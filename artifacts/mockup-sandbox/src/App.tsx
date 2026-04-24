@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType } from "react";
-
 import { modules as discoveredModules } from "./.generated/mockup-components";
+import TradingDashboard from "./components/mockups/TradingDashboard";
 
 type ModuleMap = Record<string, () => Promise<Record<string, unknown>>>;
 
@@ -31,7 +31,6 @@ function PreviewRenderer({
 
   useEffect(() => {
     let cancelled = false;
-
     setComponent(null);
     setError(null);
 
@@ -42,36 +41,25 @@ function PreviewRenderer({
         setError(`No component found at ${componentPath}.tsx`);
         return;
       }
-
       try {
         const mod = await loader();
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         const name = componentPath.split("/").pop()!;
         const comp = _resolveComponent(mod, name);
         if (!comp) {
-          setError(
-            `No exported React component found in ${componentPath}.tsx\n\nMake sure the file has at least one exported function component.`,
-          );
+          setError(`No exported React component found in ${componentPath}.tsx`);
           return;
         }
         setComponent(() => comp);
       } catch (e) {
-        if (cancelled) {
-          return;
-        }
-
+        if (cancelled) return;
         const message = e instanceof Error ? e.message : String(e);
         setError(`Failed to load preview.\n${message}`);
       }
     }
 
     void loadComponent();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [componentPath, modules]);
 
   if (error) {
@@ -83,38 +71,11 @@ function PreviewRenderer({
   }
 
   if (!Component) return null;
-
   return <Component />;
 }
 
 function getBasePath(): string {
   return import.meta.env.BASE_URL.replace(/\/$/, "");
-}
-
-function getPreviewExamplePath(): string {
-  const basePath = getBasePath();
-  return `${basePath}/preview/ComponentName`;
-}
-
-function Gallery() {
-  return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-8">
-      <div className="text-center max-w-md">
-        <h1 className="text-2xl font-semibold text-gray-900 mb-3">
-          Component Preview Server
-        </h1>
-        <p className="text-gray-500 mb-4">
-          This server renders individual components for the workspace canvas.
-        </p>
-        <p className="text-sm text-gray-400">
-          Access component previews at{" "}
-          <code className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-600">
-            {getPreviewExamplePath()}
-          </code>
-        </p>
-      </div>
-    </div>
-  );
 }
 
 function getPreviewPath(): string | null {
@@ -140,7 +101,8 @@ function App() {
     );
   }
 
-  return <Gallery />;
+  // Default: show the trading dashboard
+  return <TradingDashboard />;
 }
 
 export default App;
