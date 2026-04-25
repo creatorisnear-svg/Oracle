@@ -102,6 +102,14 @@ def _sync_fetch_live(symbol: str) -> dict:
                            getattr(info, "regularMarketPrice", None))
         prev = safe_float(getattr(info, "previous_close", None) or price)
         change_pct = (price - prev) / prev * 100 if prev > 0 else 0.0
+        # Cumulative day volume — used by the frontend to tick the live
+        # volume histogram bar alongside the candle.
+        day_vol = 0
+        try:
+            day_vol = int(safe_float(getattr(info, "last_volume", None) or
+                                     getattr(info, "regular_market_volume", None) or 0, 0))
+        except Exception:
+            day_vol = 0
 
         news = []
         try:
@@ -125,6 +133,7 @@ def _sync_fetch_live(symbol: str) -> dict:
             "symbol": symbol,
             "price": round(price, 2),
             "change_pct": round(change_pct, 3),
+            "day_volume": day_vol,
             "ts": int(time.time()),
             "market_state": str(getattr(info, "market_state", "REGULAR") or "REGULAR"),
             "news": news,

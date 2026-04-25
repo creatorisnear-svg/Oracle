@@ -370,6 +370,13 @@ export default function TradingDashboard() {
   // arrive — and roll into a fresh candle when the bar boundary is crossed.
   const lastCandleRef = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
   const barIntervalSecRef = useRef<number>(86400);
+  // Live-tick volume: the histogram series, the latest bar's value, and the
+  // last cumulative day-volume reading. On daily charts we set the bar value
+  // = day_volume directly. On intraday we increment by the delta between
+  // ticks so each bar shows volume traded inside that bar's window.
+  const volSeriesRef = useRef<any>(null);
+  const lastVolBarRef = useRef<{ time: number; value: number } | null>(null);
+  const prevDayVolRef = useRef<number>(0);
 
   // ── Chart setup ─────────────────────────────────────────────────────────
   const loadChart = useCallback(async (sym: string, p: string) => {
@@ -582,6 +589,15 @@ export default function TradingDashboard() {
           value: d.value,
           color: d.color === "#26a69a" ? "rgba(38,166,154,0.6)" : "rgba(239,83,80,0.6)",
         })));
+        // Lift the series + the latest bar so live ticks can mutate it.
+        volSeriesRef.current = volSeries;
+        const lv = data.volume[data.volume.length - 1];
+        lastVolBarRef.current = { time: Number(lv.time), value: Number(lv.value) || 0 };
+        prevDayVolRef.current = 0;  // reset; first live tick seeds the baseline
+      } else {
+        volSeriesRef.current = null;
+        lastVolBarRef.current = null;
+        prevDayVolRef.current = 0;
       }
 
       chart.timeScale().fitContent();
@@ -985,6 +1001,42 @@ export default function TradingDashboard() {
             };
             try { cR.update(upd); } catch {}
             lastCandleRef.current = upd;
+          }
+
+          // ── Live volume bar — ticks alongside the candle so the user can
+          // see if a price move is happening on real volume or thin tape.
+          // Daily bars: bar value = cumulative day volume (always growing).
+          // Intraday bars: increment by the delta since the previous tick;
+          // start a fresh bar at 0 when the bar boundary rolls.
+          const vS = volSeriesRef.current;
+          const lvBar = lastVolBarRef.current;
+          const dayVol = Number(msg.day_volume) || 0;
+          if (vS && lvBar && dayVol > 0) {
+            const cur = lastCandleRef.current!;
+            const isUp = cur.close >= cur.open;
+            const color = isUp ? "rgba(38,166,154,0.7)" : "rgba(239,83,80,0.7)";
+            let newVal = lvBar.value;
+            let newTime = lvBar.time;
+
+            if (intv >= 86400) {
+              // Daily — just mirror the cumulative day volume
+              newTime = cur.time;
+              newVal = dayVol;
+            } else {
+              // Intraday — accumulate delta into the current bar; start fresh
+              // when the bar rolls
+              const prev = prevDayVolRef.current;
+              const delta = prev > 0 ? Math.max(0, dayVol - prev) : 0;
+              if (cur.time > lvBar.time) {
+                newTime = cur.time;
+                newVal = delta;
+              } else {
+                newVal = lvBar.value + delta;
+              }
+            }
+            prevDayVolRef.current = dayVol;
+            try { vS.update({ time: newTime as any, value: newVal, color }); } catch {}
+            lastVolBarRef.current = { time: newTime, value: newVal };
           }
         }
       }
