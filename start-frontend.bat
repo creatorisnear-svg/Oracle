@@ -3,7 +3,7 @@ REM ─────────────────────────�
 REM  TradeSignal AI — Frontend launcher (port 8081)
 REM  Double-click to:
 REM    1. Kill anything still listening on port 8081
-REM    2. Pull the latest code from GitHub
+REM    2. Pull the latest code from GitHub  (skipped if called with "nopull")
 REM    3. Start the React/Vite dashboard
 REM
 REM  Open http://localhost:8081 in your browser once you see "Local: ..."
@@ -15,20 +15,23 @@ cd /d "%~dp0"
 echo [1/3] Killing anything on port 8081...
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8081') do taskkill /F /PID %%a 2>nul
 
-if /i "%1"=="nopull" (
-    echo [2/3] Skipping git pull ^(parent launcher already pulled^)...
-) else (
-    echo [2/3] Pulling latest code from GitHub (auto-stashing any local edits)...
-    git pull --rebase --autostash
-    if errorlevel 1 (
-        echo.
-        echo *** git pull failed — likely a merge conflict in your local edits. ***
-        echo *** Your changes are safe in `git stash list`. Resolve and re-run.  ***
-        pause
-        exit /b 1
-    )
-)
+if /i "%1"=="nopull" goto skippull
 
+echo [2/3] Pulling latest code from GitHub, auto-stashing any local edits...
+git pull --rebase --autostash
+if errorlevel 1 (
+    echo.
+    echo *** git pull failed - likely a merge conflict in your local edits. ***
+    echo *** Your changes are safe in `git stash list`. Resolve and re-run.  ***
+    pause
+    exit /b 1
+)
+goto runserver
+
+:skippull
+echo [2/3] Skipping git pull - parent launcher already pulled.
+
+:runserver
 echo [3/3] Starting frontend on http://localhost:8081 ...
 cd artifacts\mockup-sandbox
 set PORT=8081
