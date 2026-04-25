@@ -336,15 +336,61 @@ class OptionsFlowAgent:
 
             pc_oi = total_put_oi / total_call_oi if total_call_oi > 0 else 1
             pc_vol = total_put_vol / total_call_vol if total_call_vol > 0 else 1
+            total_vol = total_call_vol + total_put_vol
             reasons = [f"P/C OI:{pc_oi:.2f}", f"P/C Vol:{pc_vol:.2f}"]
 
-            if pc_vol < 0.5: return _vote(self.name, self.emoji, "BUY_CALL", 82, f"Heavy call flow — {' '.join(reasons)}")
-            elif pc_vol < 0.7: return _vote(self.name, self.emoji, "BUY_CALL", 70, f"Call dominance — {' '.join(reasons)}")
-            elif pc_vol > 2.0: return _vote(self.name, self.emoji, "BUY_PUT", 82, f"Heavy put flow — {' '.join(reasons)}")
-            elif pc_vol > 1.4: return _vote(self.name, self.emoji, "BUY_PUT", 70, f"Put dominance — {' '.join(reasons)}")
-            elif pc_oi < 0.7: return _vote(self.name, self.emoji, "BUY_CALL", 63, f"Call OI dominance — {' '.join(reasons)}")
-            elif pc_oi > 1.3: return _vote(self.name, self.emoji, "BUY_PUT", 63, f"Put OI dominance — {' '.join(reasons)}")
-            return _hold(self.name, self.emoji, f"Neutral flow — {' '.join(reasons)}")
+            # ── Evidence-quality gate #1: minimum option volume ─────────
+            # Thinly-traded chains produce noisy ratios — a single big trade
+            # can flip the P/C ratio. Require at least 1,000 contracts of
+            # combined volume before trusting the signal at all.
+            if total_vol < 1000:
+                return _hold(
+                    self.name, self.emoji,
+                    f"Thin options volume ({int(total_vol)} contracts) — ratio unreliable",
+                )
+
+            # ── Evidence-quality gate #2: tape confirmation ─────────────
+            # Options flow alone is contrarian-prone: heavy put buying
+            # often happens AS hedging into rallies, not because the stock
+            # is about to fall. Confirm with the actual price tape:
+            #   bullish tape  = supertrend up  AND ema9 > ema21
+            #   bearish tape  = supertrend dn  AND ema9 < ema21
+            #   mixed tape    = anything else
+            st_dir = ind.get("supertrend_dir", "up")
+            ema9 = ind.get("ema9", 0)
+            ema21 = ind.get("ema21", 0)
+            tape_bull = (st_dir == "up") and (ema9 > ema21)
+            tape_bear = (st_dir == "down") and (ema9 < ema21)
+
+            # Decide raw direction from option flow
+            if pc_vol < 0.5:    raw_dir, raw_conf, label = "BUY_CALL", 82, "Heavy call flow"
+            elif pc_vol < 0.7:  raw_dir, raw_conf, label = "BUY_CALL", 70, "Call dominance"
+            elif pc_vol > 2.0:  raw_dir, raw_conf, label = "BUY_PUT",  82, "Heavy put flow"
+            elif pc_vol > 1.4:  raw_dir, raw_conf, label = "BUY_PUT",  70, "Put dominance"
+            elif pc_oi  < 0.7:  raw_dir, raw_conf, label = "BUY_CALL", 63, "Call OI dominance"
+            elif pc_oi  > 1.3:  raw_dir, raw_conf, label = "BUY_PUT",  63, "Put OI dominance"
+            else:
+                return _hold(self.name, self.emoji, f"Neutral flow — {' '.join(reasons)}")
+
+            # Tape contradicts flow → HOLD ("nothing backing it up")
+            if raw_dir == "BUY_CALL" and tape_bear:
+                return _hold(
+                    self.name, self.emoji,
+                    f"{label} but tape bearish (ST down, EMA9<EMA21) — no confirmation",
+                )
+            if raw_dir == "BUY_PUT" and tape_bull:
+                return _hold(
+                    self.name, self.emoji,
+                    f"{label} but tape bullish (ST up, EMA9>EMA21) — no confirmation",
+                )
+
+            # Tape mixed → trim confidence; tape aligned → keep it
+            tape_aligned = (raw_dir == "BUY_CALL" and tape_bull) or (raw_dir == "BUY_PUT" and tape_bear)
+            if not tape_aligned:
+                raw_conf = max(55.0, raw_conf * 0.75)
+                label += " (mixed tape)"
+
+            return _vote(self.name, self.emoji, raw_dir, raw_conf, f"{label} — {' '.join(reasons)}")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Options unavailable: {e}")
 
@@ -1009,6 +1055,60 @@ class JudgeAgent:
             elif rsi <= 35 or bb_z <= -0.6:
                 conf *= 0.80
 
+        # ── Evidence-pillar gate ("don't fire with nothing backing it") ─
+        # Count how many INDEPENDENT lines of evidence actually agree with
+        # the chosen direction. Four pillars, each weighted equally:
+        #   1. TREND     – SuperTrend direction + EMA9 vs EMA21
+        #   2. MOMENTUM  – MACD histogram + ROC10 + ADX directional bias
+        #   3. VOLUME    – OBV slope + 5-vs-20-day volume trend
+        #   4. PRICE     – position vs VWAP + last candle vs prior close
+        # Need >=3 pillars aligned for full confidence, =2 trims confidence,
+        # <2 means the agents are voting on flimsy evidence -> HOLD.
+        evidence_reason = None
+        if signal != "HOLD":
+            ema9 = float(ind.get("ema9") or price)
+            ema21 = float(ind.get("ema21") or price)
+            st_dir = ind.get("supertrend_dir", "up")
+            macd_hist = float(ind.get("macd_hist") or 0)
+            roc10 = float(ind.get("change_5d") or 0)  # 5-day price change % (proxy for ROC)
+            plus_di = float(ind.get("plus_di") or 25)
+            minus_di = float(ind.get("minus_di") or 25)
+            obv_slope = float(ind.get("obv_slope_10d_pct") or 0)
+            vol_trend = float(ind.get("vol_trend_5v20") or 1.0)
+            pvwap = float(ind.get("price_vs_vwap_pct") or 0)
+            last_close = float(df["Close"].iloc[-1]) if len(df) else price
+            prev_close = float(df["Close"].iloc[-2]) if len(df) >= 2 else last_close
+
+            if signal == "BUY_CALL":
+                trend_ok = (st_dir == "up") and (ema9 > ema21)
+                momo_ok = (macd_hist > 0) and (roc10 > 0) and (plus_di >= minus_di)
+                vol_ok = (obv_slope > 0) and (vol_trend >= 0.9)
+                price_ok = (pvwap > 0) and (last_close >= prev_close)
+            else:  # BUY_PUT
+                trend_ok = (st_dir == "down") and (ema9 < ema21)
+                momo_ok = (macd_hist < 0) and (roc10 < 0) and (minus_di >= plus_di)
+                vol_ok = (obv_slope < 0) and (vol_trend >= 0.9)
+                price_ok = (pvwap < 0) and (last_close <= prev_close)
+
+            pillars_aligned = sum([trend_ok, momo_ok, vol_ok, price_ok])
+            pillar_names = ["trend", "momentum", "volume", "price"]
+            agreed_pillars = [n for n, ok in zip(pillar_names, [trend_ok, momo_ok, vol_ok, price_ok]) if ok]
+
+            if pillars_aligned < 2:
+                # Nothing backing it up — refuse to fire.
+                evidence_reason = (
+                    f"only {pillars_aligned}/4 pillars confirm "
+                    f"({', '.join(agreed_pillars) or 'none'}) — no evidence backing it"
+                )
+                signal = "HOLD"
+                target = price
+                stop = round(price - stop_mult * atr, 2)
+                conf = 50.0
+            elif pillars_aligned == 2:
+                # Half-confirmed — trim conviction
+                conf *= 0.80
+            # 3+ pillars → no penalty (well-supported)
+
         # Consensus strength: the more dissenting agents, the lower the conviction.
         # 9/9 agree → 1.00x; 5/9 → 0.75x.
         if signal != "HOLD" and total_analysts > 0:
@@ -1122,9 +1222,11 @@ class JudgeAgent:
             "judge_reason": (
                 f"{call_count}/{total_analysts} CALL, {put_count}/{total_analysts} PUT — " +
                 (f"🛑 VETO: {veto_reason}" if veto_reason
-                 else ("✅ CONSENSUS" if signal != "HOLD"
-                       else f"⏳ Need {self.THRESHOLD}/{total_analysts}"))
+                 else (f"🛑 NO BACKING: {evidence_reason}" if evidence_reason
+                       else ("✅ CONSENSUS" if signal != "HOLD"
+                             else f"⏳ Need {self.THRESHOLD}/{total_analysts}")))
             ),
+            "evidence_reason": evidence_reason,
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],
             "expiry_hint": opts["expiry_hint"],
