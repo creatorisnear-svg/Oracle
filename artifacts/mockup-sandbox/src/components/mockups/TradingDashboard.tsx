@@ -943,7 +943,7 @@ export default function TradingDashboard() {
           <div className="flex flex-wrap gap-1 p-2 border-b border-slate-800 shrink-0">
             {([
               ["signal","SIGNAL"],["agents","AGENTS"],["options","OPTIONS"],["chain","CHAIN"],
-              ["news","NEWS"],["fear","F&G"],["accuracy","ACCURACY"],["paper","PAPER 💰"]
+              ["news","NEWS"],["fear","F&G"],["accuracy","ACCURACY"],["paper","PAPER"]
             ] as const).map(([t, label]) => (
               <button key={t} onClick={() => {
                 setTab(t);
@@ -961,7 +961,6 @@ export default function TradingDashboard() {
               <div className="space-y-4">
                 {!judgment && !analyzing ? (
                   <div className="text-center py-8 space-y-2">
-                    <div className="text-3xl">📊</div>
                     <p className="text-slate-400 text-sm">Enter a symbol and click Analyze</p>
                     <p className="text-slate-500 text-xs">9 agents will vote CALL / PUT / HOLD</p>
                     <p className="text-slate-600 text-xs">6 of 9 must agree to fire a signal</p>
@@ -1016,7 +1015,7 @@ export default function TradingDashboard() {
                             : "bg-red-600 hover:bg-red-500 text-white shadow-red-500/20"
                         } shadow-lg`}
                       >
-                        💰 Paper Trade This {judgment.signal === "BUY_CALL" ? "CALL" : "PUT"}
+                        Paper Trade This {judgment.signal === "BUY_CALL" ? "CALL" : "PUT"}
                       </button>
                     )}
                     {judgment.macro_context && (
@@ -1201,13 +1200,13 @@ export default function TradingDashboard() {
                       <SignalBadge signal={judgment.signal} size="md" />
                     </div>
                     <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
-                      <div className="text-xs text-slate-500 font-semibold">🎯 STRIKE</div>
+                      <div className="text-xs text-slate-500 font-semibold">STRIKE</div>
                       <div className="text-sm font-bold text-slate-200">{judgment.strike_hint}</div>
                     </div>
                     {/* Expiry date cards */}
                     {judgment.expiry_weekly && (
                       <div>
-                        <div className="text-xs text-slate-500 font-semibold mb-1.5">📅 EXPIRY OPTIONS</div>
+                        <div className="text-xs text-slate-500 font-semibold mb-1.5">EXPIRY OPTIONS</div>
                         <div className="grid grid-cols-3 gap-1.5">
                           {[
                             { label: "Weekly", date: judgment.expiry_weekly, note: "7 DTE", color: "border-emerald-700 bg-emerald-900/20" },
@@ -1224,11 +1223,11 @@ export default function TradingDashboard() {
                       </div>
                     )}
                     <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
-                      <div className="text-xs text-slate-500 font-semibold">⚡ ENTRY TRIGGER</div>
+                      <div className="text-xs text-slate-500 font-semibold">ENTRY TRIGGER</div>
                       <div className="text-sm text-slate-200 leading-relaxed">{judgment.entry_trigger}</div>
                     </div>
                     <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
-                      <div className="text-xs text-slate-500 font-semibold">🛡️ RISK NOTE</div>
+                      <div className="text-xs text-slate-500 font-semibold">RISK NOTE</div>
                       <div className="text-sm text-slate-200 leading-relaxed">{judgment.risk_note}</div>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
@@ -1258,7 +1257,7 @@ export default function TradingDashboard() {
                             judgment.track_record.rating === "good"   ? "text-sky-400" :
                             judgment.track_record.rating === "weak"   ? "text-amber-400" :
                                                                         "text-red-400"
-                          }`}>📊 MODEL TRACK RECORD</div>
+                          }`}>MODEL TRACK RECORD</div>
                           <div className="text-2xl font-black font-mono">
                             {judgment.track_record.hit_rate.toFixed(0)}%
                           </div>
@@ -1269,7 +1268,7 @@ export default function TradingDashboard() {
                     {judgment.kelly && (
                       <div className="bg-emerald-900/20 border border-emerald-800/40 rounded-xl p-3">
                         <div className="flex items-baseline justify-between mb-1">
-                          <div className="text-xs text-emerald-400 font-bold tracking-wider">⚙️ KELLY (regime-aware)</div>
+                          <div className="text-xs text-emerald-400 font-bold tracking-wider">KELLY (regime-aware)</div>
                           <div className="text-[10px] text-slate-500 uppercase">{judgment.kelly.regime.replace("_", " ")}</div>
                         </div>
                         {judgment.kelly.kelly_pct > 0 ? (
