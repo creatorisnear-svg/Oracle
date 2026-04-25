@@ -1,4 +1,36 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.1
+# TradeSignal AI — 9-Agent Trading Prediction System v6.2
+
+## Accuracy upgrades (v6.2)
+Four targeted fixes to known weaknesses in the agent stack:
+
+1. **Earnings-proximity veto** — `_earnings_proximity(sym)` in `server.py`
+   pulls the next earnings date from `yf.Ticker.calendar` /
+   `ticker.earnings_dates` and stuffs `{days_until, in_danger, in_caution,
+   date}` into `ind["earnings"]`. The Judge HOLDs any directional signal
+   in the 0–2 day danger window (binary event + IV crush risk) and trims
+   confidence by 15% in the 3–5 day caution window. Surfaced in the
+   judgment payload at `macro_context.earnings`.
+
+2. **OptionsFlowAgent IV/RV gate (IVR proxy)** — computes ATM implied
+   vol (median across strikes within ±7% of spot) and divides by 20-day
+   realized vol from indicators. Long options pay vega, so when IV is
+   rich vs realized the premium is structurally too expensive. Trims
+   confidence 20% when ratio ≥ 1.6, 10% when ≥ 1.3, boosts 5% when ≤ 0.8.
+   Exposed on the vote as `iv_atm_pct` and `iv_rv_ratio`.
+
+3. **SentimentAgent — negation + recency** — adds a NEGATIONS list and a
+   `_is_negated()` window check (looks back 22 chars, forward 30 chars
+   for "erased / halted / reversed" post-modifiers) so headlines like
+   "gains erased" or "no longer bullish" no longer score positive.
+   Recency weighting via `_recency_weight()` half-lifes news at 24h
+   (0h → 1.6×, 6h → 1.2×, 24h → 0.8×, 72h → 0.45×) using
+   `providerPublishTime` / `published_at`.
+
+4. **PoliticalAgent bigram fix** — replaced bare-token matches like
+   `"china"` and `"tariff"` (which both bullish and bearish phrasings
+   matched to noise) with disambiguated bigrams: `"china tariff"`,
+   `"china deal"`, `"new tariff"`, `"tariff removed"`, etc. Same
+   `_negated()` window check applied here too.
 
 ## Paper Trading (v6.1)
 A simulated trading account is now wired into the system. Every signal can be

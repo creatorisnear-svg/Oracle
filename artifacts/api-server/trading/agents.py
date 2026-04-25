@@ -569,6 +569,60 @@ class SentimentAgent:
                "lawsuit","fraud","recall","shortage","debt","deficit","investigation","probe",
                "default","bankruptcy","missed","disappoints","suspended","warning","slump"]
 
+    # Words that flip the polarity of a nearby keyword. Without this, headlines
+    # like "gains erased" or "no longer bullish" scored as bullish.
+    NEGATIONS = ("no ", "not ", "never ", "without ", "avoids ", "averted ",
+                 "no longer ", "ruled out ", "denies ", "rejects ", "erased ",
+                 "ends ", "halts ", "stops ", "fails to ")
+
+    @staticmethod
+    def _is_negated(text: str, idx: int) -> bool:
+        # Look back ~22 chars for a negation token, and ~14 chars forward
+        # for "erased" / "halted" style post-modifiers.
+        before = text[max(0, idx - 22):idx]
+        after = text[idx:idx + 30]
+        if any(neg in before for neg in SentimentAgent.NEGATIONS):
+            return True
+        return any(post in after for post in (" erased", " halted", " reversed",
+                                              " wiped out", " evaporated"))
+
+    @staticmethod
+    def _recency_weight(item: dict, now_ts: float) -> float:
+        """Newer headlines are heavier. Half-life ~24h. Falls back to 1.0."""
+        ts = item.get("providerPublishTime") or item.get("published_at") or 0
+        try:
+            ts = float(ts)
+            if ts <= 0:
+                return 1.0
+            # Some feeds give ms — normalise.
+            if ts > 1e12:
+                ts = ts / 1000.0
+            age_h = max(0.0, (now_ts - ts) / 3600.0)
+            # 0h → 1.6, 6h → 1.2, 24h → 0.8, 72h → 0.45
+            return round(max(0.4, 1.6 * (0.5 ** (age_h / 24.0))), 3)
+        except Exception:
+            return 1.0
+
+    def _score_text(self, text: str, weight: float) -> tuple[float, float]:
+        bull = bear = 0.0
+        for w in self.BULLISH:
+            i = text.find(w)
+            while i != -1:
+                if self._is_negated(text, i):
+                    bear += weight    # flipped
+                else:
+                    bull += weight
+                i = text.find(w, i + len(w))
+        for w in self.BEARISH:
+            i = text.find(w)
+            while i != -1:
+                if self._is_negated(text, i):
+                    bull += weight
+                else:
+                    bear += weight
+                i = text.find(w, i + len(w))
+        return bull, bear
+
     def analyze(self, df, ind):
         try:
             news = ind.get("_news", [])
@@ -578,13 +632,14 @@ class SentimentAgent:
                 elif ch5 < -3: return _vote(self.name, self.emoji, "BUY_PUT", 62, f"5D trend {ch5:.1f}% (no live news)")
                 return _hold(self.name, self.emoji, "No news; price trend neutral")
 
-            bull_score = bear_score = 0
+            now_ts = time.time()
+            bull_score = bear_score = 0.0
             for item in news[:12]:
-                title = (item.get("title", "") + " " + item.get("summary", "")).lower()
-                for w in self.BULLISH:
-                    if w in title: bull_score += 1
-                for w in self.BEARISH:
-                    if w in title: bear_score += 1
+                text = (item.get("title", "") + " " + item.get("summary", "")).lower()
+                w = self._recency_weight(item, now_ts)
+                b, r = self._score_text(text, w)
+                bull_score += b
+                bear_score += r
 
             total = bull_score + bear_score
             if total == 0:
@@ -592,11 +647,13 @@ class SentimentAgent:
 
             ratio = bull_score / total
             conf = 55 + abs(bull_score - bear_score) / max(total, 1) * 30
+            bs = round(bull_score, 1)
+            rs = round(bear_score, 1)
             if ratio > 0.6:
-                return _vote(self.name, self.emoji, "BUY_CALL", conf, f"News bullish {bull_score}↑/{bear_score}↓")
+                return _vote(self.name, self.emoji, "BUY_CALL", conf, f"News bullish {bs}↑/{rs}↓ (recency-weighted)")
             elif ratio < 0.4:
-                return _vote(self.name, self.emoji, "BUY_PUT", conf, f"News bearish {bear_score}↓/{bull_score}↑")
-            return _hold(self.name, self.emoji, f"Mixed news {bull_score}↑/{bear_score}↓")
+                return _vote(self.name, self.emoji, "BUY_PUT", conf, f"News bearish {rs}↓/{bs}↑ (recency-weighted)")
+            return _hold(self.name, self.emoji, f"Mixed news {bs}↑/{rs}↓ (recency-weighted)")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Error: {e}")
 
@@ -632,6 +689,32 @@ class OptionsFlowAgent:
             pc_vol = total_put_vol / total_call_vol if total_call_vol > 0 else 1
             total_vol = total_call_vol + total_put_vol
             reasons = [f"P/C OI:{pc_oi:.2f}", f"P/C Vol:{pc_vol:.2f}"]
+
+            # ── IV-vs-realized-vol gate (IVR proxy) ─────────────────────
+            # True 52-wk IVR needs an IV history database (paid). A clean
+            # free proxy: compare current at-the-money implied vol to 20-day
+            # REALIZED volatility. When IV >> RV, options are priced for a
+            # bigger move than the stock has been making — long calls/puts
+            # have a structural disadvantage (vega bleed + IV-crush risk).
+            # When IV < RV, options are cheap relative to actual movement
+            # (favourable for long premium).
+            iv_pct = None
+            iv_rv_ratio = None
+            try:
+                price_now = float(ind.get("price") or 0)
+                if price_now > 0 and "strike" in calls.columns and "impliedVolatility" in calls.columns:
+                    # ATM = strikes within ±7% of spot (median is robust to outlier wings)
+                    near_atm = calls[(calls["strike"] >= price_now * 0.93) &
+                                     (calls["strike"] <= price_now * 1.07)]
+                    if len(near_atm) >= 3:
+                        iv_med = float(near_atm["impliedVolatility"].median())
+                        iv_pct = round(iv_med * 100, 1)  # 0.42 → 42.0
+                        rv = float(ind.get("volatility_20d") or 0)  # already in %
+                        if rv > 0 and iv_pct > 0:
+                            iv_rv_ratio = round(iv_pct / rv, 2)
+                            reasons.append(f"IV/RV:{iv_rv_ratio:.2f} (IV {iv_pct:.0f}% vs RV {rv:.0f}%)")
+            except Exception as _e:
+                logger.debug(f"IV/RV calc failed: {_e}")
 
             # ── Evidence-quality gate #1: minimum option volume ─────────
             # Thinly-traded chains produce noisy ratios — a single big trade
@@ -684,7 +767,27 @@ class OptionsFlowAgent:
                 raw_conf = max(55.0, raw_conf * 0.75)
                 label += " (mixed tape)"
 
-            return _vote(self.name, self.emoji, raw_dir, raw_conf, f"{label} — {' '.join(reasons)}")
+            # ── IV/RV adjustment ────────────────────────────────────────
+            # Long options pay vega — when IV is rich vs realized vol the
+            # premium is structurally too expensive. Trim confidence so
+            # the Judge thinks twice. When IV is cheap, give a small boost.
+            if iv_rv_ratio is not None:
+                if iv_rv_ratio >= 1.6:
+                    raw_conf *= 0.80
+                    label += " (IV expensive)"
+                elif iv_rv_ratio >= 1.3:
+                    raw_conf *= 0.90
+                elif iv_rv_ratio <= 0.8:
+                    raw_conf = min(95.0, raw_conf * 1.05)
+                    label += " (IV cheap)"
+
+            vote = _vote(self.name, self.emoji, raw_dir, raw_conf, f"{label} — {' '.join(reasons)}")
+            # Surface IV stats for the Judge / UI
+            if iv_pct is not None:
+                vote["iv_atm_pct"] = iv_pct
+            if iv_rv_ratio is not None:
+                vote["iv_rv_ratio"] = iv_rv_ratio
+            return vote
         except Exception as e:
             return _hold(self.name, self.emoji, f"Options unavailable: {e}")
 
@@ -970,21 +1073,34 @@ class PoliticalAgent:
     emoji = "🏛️"
     method = "Google News RSS scraper for Trump + tariff + Fed + macro keywords — market impact scoring"
 
+    # NOTE: All keywords use multi-word phrases to avoid false matches.
+    # E.g. bare "china" matched both "china tariff" (bearish) and "china deal"
+    # (bullish), netting to noise. Bigrams disambiguate context.
     MARKET_BULLISH = [
-        "tax cut", "deregulation", "stimulus", "deal", "agreement", "rate cut",
-        "rate hold", "pause", "eases", "boosts", "supports", "pro-business",
-        "infrastructure", "signed", "passed", "boom", "recovery", "strong economy",
-        "jobs added", "beats expectations", "trade deal", "ceasefire", "peace",
-        "tariff removed", "exemption", "positive", "rally", "gains"
+        "tax cut", "deregulation", "stimulus", "trade deal", "trade agreement",
+        "rate cut", "rate hold", "fed pause", "fed eases", "pro-business",
+        "infrastructure bill", "bill signed", "bill passed", "economic boom",
+        "economic recovery", "strong economy", "jobs added", "beats expectations",
+        "ceasefire", "peace deal", "tariff removed", "tariff exemption",
+        "tariff lifted", "china deal", "china agreement", "rally extends",
+        "market gains", "earnings beat",
     ]
     MARKET_BEARISH = [
-        "tariff", "trade war", "sanction", "ban", "escalate", "retaliate",
-        "recession", "inflation", "hike", "rate hike", "hawkish", "tightening",
-        "debt ceiling", "shutdown", "default", "war", "conflict", "tension",
-        "investigation", "indicted", "impeach", "crisis", "crash", "plunge",
-        "layoff", "bankruptcy", "losses", "miss", "disappoints", "uncertainty",
-        "tariffs raised", "china", "new tariff", "additional tariff"
+        "trade war", "new tariff", "additional tariff", "tariff hike",
+        "tariffs raised", "china tariff", "china sanction", "china retaliation",
+        "sanctions imposed", "export ban", "escalates tensions", "retaliate",
+        "recession risk", "inflation surge", "rate hike", "hawkish fed",
+        "fed tightening", "debt ceiling", "government shutdown", "us default",
+        "war breaks out", "armed conflict", "geopolitical tension",
+        "doj investigation", "indicted", "impeachment", "financial crisis",
+        "market crash", "stocks plunge", "mass layoff", "bankruptcy filing",
+        "earnings miss", "disappoints expectations", "policy uncertainty",
     ]
+
+    # Tokens that flip the meaning of a nearby keyword. Scanned within a
+    # small window before a matched phrase.
+    NEGATIONS = ("no ", "not ", "never ", "without ", "avoids ", "averted ",
+                 "no longer ", "ruled out ", "denies ", "rejects ")
 
     _news_cache: list = []
     _cache_ts: float = 0
@@ -1030,6 +1146,22 @@ class PoliticalAgent:
         PoliticalAgent._cache_ts = time.time()
         return all_news
 
+    def _negated(self, text: str, idx: int) -> bool:
+        """True if the keyword at `idx` is negated by a token in the prior ~25 chars."""
+        window = text[max(0, idx - 25):idx]
+        return any(neg in window for neg in self.NEGATIONS)
+
+    def _count_phrases(self, text: str, phrases: list) -> int:
+        """Count phrase hits, skipping any whose nearby context negates them."""
+        n = 0
+        for w in phrases:
+            i = text.find(w)
+            while i != -1:
+                if not self._negated(text, i):
+                    n += 1
+                i = text.find(w, i + len(w))
+        return n
+
     def analyze(self, df, ind):
         try:
             news = self._fetch_political_news()
@@ -1044,8 +1176,8 @@ class PoliticalAgent:
             top_headlines = []
             for item in all_news[:15]:
                 title = (item.get("title", "") + " " + item.get("summary", "")).lower()
-                item_bull = sum(1 for w in self.MARKET_BULLISH if w in title)
-                item_bear = sum(1 for w in self.MARKET_BEARISH if w in title)
+                item_bull = self._count_phrases(title, self.MARKET_BULLISH)
+                item_bear = self._count_phrases(title, self.MARKET_BEARISH)
                 bull += item_bull
                 bear += item_bear
                 if item_bull > 0 or item_bear > 0:
@@ -1399,6 +1531,26 @@ class JudgeAgent:
                 veto_reason = f"oversold (RSI {rsi:.0f}, BB-z {bb_z:+.2f}) — chasing bottom vetoed"
             elif rsi <= 35 or bb_z <= -0.6:
                 conf *= 0.80
+
+        # ── EARNINGS PROXIMITY VETO ─────────────────────────────────────
+        # Directional options 0-2 days before earnings are essentially
+        # binary-event coin flips: even a directionally-correct prediction
+        # often loses to IV crush after the print. Suppress signals in the
+        # danger window; trim confidence in the caution window (3-5 days).
+        earn = ind.get("earnings") or {}
+        earn_days = earn.get("days_until")
+        if signal != "HOLD" and isinstance(earn_days, (int, float)):
+            if earn.get("in_danger"):  # 0-2 days
+                evidence_reason = (
+                    f"earnings in {earn_days:.1f}d ({earn.get('date','')}) "
+                    "— binary event + IV crush risk"
+                )
+                signal = "HOLD"
+                target = price
+                stop = round(price - stop_mult * atr, 2)
+                conf = 50.0
+            elif earn.get("in_caution"):  # 3-5 days — trim only
+                conf *= 0.85
 
         # ── Accuracy-booster filters (run BEFORE the evidence-pillar gate) ─
         # These three filters all come from well-documented edge sources:
@@ -1819,6 +1971,7 @@ class JudgeAgent:
                 "sector_rotation": ind.get("sector_rotation"),
                 "fundamentals": fund,
                 "short_squeeze": squeeze,
+                "earnings": ind.get("earnings"),
                 "discovered_strategies": disc,
             },
             "action": opts["action"],

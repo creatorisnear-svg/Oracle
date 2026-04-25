@@ -410,6 +410,75 @@ def _fundamentals(sym: str) -> dict:
     return result
 
 
+def _earnings_proximity(sym: str) -> dict:
+    """How many calendar days until the next earnings release.
+
+    Trading directional options 1-2 days before earnings is a binary-event
+    coin flip — IV crush after the print can wipe out a directionally-correct
+    bet. The Judge uses this to suppress signals inside the danger window.
+
+    Returns {days_until: int|None, in_danger: bool, in_caution: bool, date: str}.
+    Cached 30 min — earnings dates don't move intraday."""
+    key = (sym.upper(), "earn")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 1800:
+        return cached[0]
+
+    result = {"days_until": None, "in_danger": False, "in_caution": False, "date": ""}
+    try:
+        ticker = yf.Ticker(sym)
+        next_dt = None
+
+        # Path 1: ticker.calendar (dict in modern yfinance)
+        try:
+            cal = ticker.calendar
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date") or cal.get("earningsDate")
+                if isinstance(ed, list) and ed:
+                    next_dt = ed[0]
+                elif ed:
+                    next_dt = ed
+        except Exception:
+            pass
+
+        # Path 2: ticker.earnings_dates (DataFrame indexed by date)
+        if next_dt is None:
+            try:
+                edf = ticker.earnings_dates
+                if edf is not None and not edf.empty:
+                    import datetime as _dt
+                    now_utc = _dt.datetime.now(_dt.timezone.utc)
+                    future = [d for d in edf.index
+                              if hasattr(d, "to_pydatetime")
+                              and d.to_pydatetime() >= now_utc]
+                    if future:
+                        next_dt = min(future).to_pydatetime()
+            except Exception:
+                pass
+
+        if next_dt is not None:
+            import datetime as _dt
+            if hasattr(next_dt, "to_pydatetime"):
+                next_dt = next_dt.to_pydatetime()
+            if isinstance(next_dt, _dt.date) and not isinstance(next_dt, _dt.datetime):
+                next_dt = _dt.datetime.combine(next_dt, _dt.time(0, 0, tzinfo=_dt.timezone.utc))
+            if next_dt.tzinfo is None:
+                next_dt = next_dt.replace(tzinfo=_dt.timezone.utc)
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            days = (next_dt - now_utc).total_seconds() / 86400.0
+            if days >= -1:  # ignore long-past dates
+                result = {
+                    "days_until": round(days, 1),
+                    "in_danger": 0 <= days <= 2,
+                    "in_caution": 0 <= days <= 5,
+                    "date": next_dt.strftime("%Y-%m-%d"),
+                }
+    except Exception as e:
+        logger.debug(f"earnings proximity {sym}: {e}")
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
 def _short_squeeze_score(sym: str, ind: dict) -> dict:
     """Estimate short-squeeze risk: high short interest + low float + price compression
     near recent highs = squeeze fuel."""
@@ -489,6 +558,7 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
     ind["sector_rotation"] = _sector_rotation()
     ind["fundamentals"] = _fundamentals(sym)
     ind["short_squeeze"] = _short_squeeze_score(sym, ind)
+    ind["earnings"] = _earnings_proximity(sym)
     weights = LEARNING.get_weights()
 
     # Meta-learning multipliers (per regime + per symbol).
