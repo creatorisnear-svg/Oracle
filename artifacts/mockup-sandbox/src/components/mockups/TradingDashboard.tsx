@@ -42,6 +42,11 @@ interface Judgment {
     trend: boolean; momentum: boolean; volume: boolean; price: boolean;
     aligned: number; total: number;
   } | null;
+  macro_context?: {
+    adx: number;
+    weekly_trend: { dir: "up" | "down" | "flat" | "self"; strength: number; ema20?: number };
+    spy_trend: { dir: "up" | "down" | "flat" | "self"; pct_from_ema50: number };
+  } | null;
   action: string; strike_hint: string; expiry_hint: string;
   expiry_weekly: string; expiry_biweekly: string; expiry_monthly: string;
   entry_trigger: string; risk_note: string;
@@ -853,6 +858,60 @@ export default function TradingDashboard() {
                         </div>
                       )}
                     </div>
+                    {judgment.macro_context && (
+                      <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5">
+                        <div className="text-xs text-slate-500 font-semibold">MACRO CONTEXT</div>
+                        <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+                          {(() => {
+                            const adx = judgment.macro_context.adx;
+                            const adxOk = adx >= 18;
+                            return (
+                              <div className={`flex flex-col items-center justify-center rounded px-1.5 py-1 border ${
+                                adxOk ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                                      : "bg-red-500/10 border-red-500/40 text-red-300"
+                              }`}>
+                                <span className="text-[10px] uppercase opacity-70">ADX</span>
+                                <span className="font-mono font-bold">{adx.toFixed(0)} {adxOk ? "✓" : "chop"}</span>
+                              </div>
+                            );
+                          })()}
+                          {(() => {
+                            const w = judgment.macro_context.weekly_trend;
+                            const arrow = w.dir === "up" ? "▲" : w.dir === "down" ? "▼" : "—";
+                            const cls = w.dir === "up" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                                      : w.dir === "down" ? "bg-red-500/10 border-red-500/30 text-red-300"
+                                      : "bg-slate-700/30 border-slate-600/40 text-slate-400";
+                            return (
+                              <div className={`flex flex-col items-center justify-center rounded px-1.5 py-1 border ${cls}`}>
+                                <span className="text-[10px] uppercase opacity-70">Weekly</span>
+                                <span className="font-mono font-bold">{arrow} {w.strength.toFixed(1)}%</span>
+                              </div>
+                            );
+                          })()}
+                          {(() => {
+                            const s = judgment.macro_context.spy_trend;
+                            if (s.dir === "self") {
+                              return (
+                                <div className="flex flex-col items-center justify-center rounded px-1.5 py-1 border bg-slate-700/30 border-slate-600/40 text-slate-400">
+                                  <span className="text-[10px] uppercase opacity-70">SPY</span>
+                                  <span className="font-mono font-bold">— self</span>
+                                </div>
+                              );
+                            }
+                            const arrow = s.dir === "up" ? "▲" : s.dir === "down" ? "▼" : "—";
+                            const cls = s.dir === "up" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                                      : s.dir === "down" ? "bg-red-500/10 border-red-500/30 text-red-300"
+                                      : "bg-slate-700/30 border-slate-600/40 text-slate-400";
+                            return (
+                              <div className={`flex flex-col items-center justify-center rounded px-1.5 py-1 border ${cls}`}>
+                                <span className="text-[10px] uppercase opacity-70">SPY</span>
+                                <span className="font-mono font-bold">{arrow} {s.pct_from_ema50.toFixed(1)}%</span>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    )}
                     {judgment.evidence_pillars && (
                       <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5">
                         <div className="flex justify-between items-center text-xs">

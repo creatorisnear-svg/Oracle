@@ -133,10 +133,80 @@ def get_df(symbol: str, period: str = "3mo", interval: str = "1d"):
     return df, info
 
 
+def _weekly_trend(symbol: str) -> dict:
+    """Higher-timeframe trend filter: weekly EMA20 slope + price-vs-EMA20.
+    Returns {dir: 'up'|'down'|'flat', strength: float, ema20: float}.
+    Cached 1 h since weekly data only meaningfully changes once per week."""
+    key = (symbol, "weekly_trend")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 3600:
+        return cached[0]
+    try:
+        wdf = yf.Ticker(symbol).history(period="2y", interval="1wk")
+        if wdf.empty or len(wdf) < 25:
+            result = {"dir": "flat", "strength": 0.0, "ema20": 0.0}
+        else:
+            closes = wdf["Close"].values
+            ema20 = pd.Series(closes).ewm(span=20).mean().values
+            price = float(closes[-1])
+            e_now = float(ema20[-1])
+            e_prev = float(ema20[-5]) if len(ema20) >= 5 else float(ema20[-1])
+            slope_pct = (e_now - e_prev) / e_prev * 100 if e_prev > 0 else 0.0
+            above = price > e_now
+            if slope_pct > 0.3 and above:
+                direction = "up"
+            elif slope_pct < -0.3 and not above:
+                direction = "down"
+            else:
+                direction = "flat"
+            result = {"dir": direction, "strength": float(abs(slope_pct)), "ema20": e_now}
+    except Exception:
+        result = {"dir": "flat", "strength": 0.0, "ema20": 0.0}
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _spy_trend() -> dict:
+    """Index-context filter: SPY daily SuperTrend + EMA50 slope.
+    Returns {dir: 'up'|'down'|'flat', pct_from_ema50: float}.
+    Cached 5 min since this only needs to be computed once across symbols."""
+    key = ("__SPY__", "spy_trend")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 300:
+        return cached[0]
+    try:
+        sdf = yf.Ticker("SPY").history(period="3mo", interval="1d")
+        if sdf.empty or len(sdf) < 60:
+            result = {"dir": "flat", "pct_from_ema50": 0.0}
+        else:
+            closes = sdf["Close"].values
+            ema50 = pd.Series(closes).ewm(span=50).mean().values
+            price = float(closes[-1])
+            e_now = float(ema50[-1])
+            e_prev = float(ema50[-10]) if len(ema50) >= 10 else float(ema50[-1])
+            slope_pct = (e_now - e_prev) / e_prev * 100 if e_prev > 0 else 0.0
+            pct_from = (price - e_now) / e_now * 100 if e_now > 0 else 0.0
+            if slope_pct > 0.4 and pct_from > -1.0:
+                direction = "up"
+            elif slope_pct < -0.4 and pct_from < 1.0:
+                direction = "down"
+            else:
+                direction = "flat"
+            result = {"dir": direction, "pct_from_ema50": pct_from}
+    except Exception:
+        result = {"dir": "flat", "pct_from_ema50": 0.0}
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
 def run_agents_sync(sym: str, df: pd.DataFrame, info: dict):
     ind = compute_all_indicators(df)
     ind["_symbol"] = sym
     ind["_news"] = _LIVE_CACHE.get(sym, {}).get("news", [])
+    # ── Higher-TF & market-context filters (accuracy boosters) ─────
+    ind["weekly_trend"] = _weekly_trend(sym)
+    # Skip the SPY-vs-SPY tautology when analysing SPY itself
+    ind["spy_trend"] = {"dir": "self", "pct_from_ema50": 0.0} if sym == "SPY" else _spy_trend()
     weights = LEARNING.get_weights()
     votes = []
     for agent in AGENTS:

@@ -1055,6 +1055,45 @@ class JudgeAgent:
             elif rsi <= 35 or bb_z <= -0.6:
                 conf *= 0.80
 
+        # ── Accuracy-booster filters (run BEFORE the evidence-pillar gate) ─
+        # These three filters all come from well-documented edge sources:
+        #   1. CHOP filter      – ADX<18 means non-trending → all signals are noise
+        #   2. WEEKLY trend     – Higher-timeframe trend filter (weekly EMA20)
+        #   3. INDEX context    – Don't fight SPY's macro direction
+        adx = float(ind.get("adx") or 20)
+        weekly = ind.get("weekly_trend") or {"dir": "flat", "strength": 0.0}
+        spy = ind.get("spy_trend") or {"dir": "flat", "pct_from_ema50": 0.0}
+
+        # 1) Chop filter — ADX measures TREND STRENGTH. <18 = no trend = noise.
+        if signal != "HOLD" and adx < 18:
+            evidence_reason = f"ADX {adx:.0f} < 18 — non-trending market, signals unreliable"
+            signal = "HOLD"
+            target = price
+            stop = round(price - stop_mult * atr, 2)
+            conf = 50.0
+
+        # 2) Weekly counter-trend filter — daily signal must agree with the
+        #    weekly trend. Going against the higher TF is a documented loser.
+        if signal == "BUY_CALL" and weekly.get("dir") == "down" and weekly.get("strength", 0) > 0.6:
+            evidence_reason = f"weekly trend down ({weekly.get('strength',0):.1f}%/wk) — daily CALL fights higher TF"
+            signal = "HOLD"
+            target = price
+            stop = round(price - stop_mult * atr, 2)
+            conf = 50.0
+        elif signal == "BUY_PUT" and weekly.get("dir") == "up" and weekly.get("strength", 0) > 0.6:
+            evidence_reason = f"weekly trend up ({weekly.get('strength',0):.1f}%/wk) — daily PUT fights higher TF"
+            signal = "HOLD"
+            target = price
+            stop = round(price - stop_mult * atr, 2)
+            conf = 50.0
+
+        # 3) SPY context — fighting the index is allowed but penalised.
+        #    Only applies to non-index symbols (spy.dir == "self" for SPY itself).
+        if signal != "HOLD" and spy.get("dir") not in ("flat", "self"):
+            if (signal == "BUY_CALL" and spy["dir"] == "down") or \
+               (signal == "BUY_PUT" and spy["dir"] == "up"):
+                conf *= 0.85   # 15% confidence haircut for fighting the index
+
         # ── Evidence-pillar gate ("don't fire with nothing backing it") ─
         # Count how many INDEPENDENT lines of evidence actually agree with
         # the chosen direction. Four pillars, each weighted equally:
@@ -1238,6 +1277,11 @@ class JudgeAgent:
             ),
             "evidence_reason": evidence_reason,
             "evidence_pillars": evidence_pillars or None,
+            "macro_context": {
+                "adx": round(adx, 1),
+                "weekly_trend": weekly,
+                "spy_trend": spy,
+            },
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],
             "expiry_hint": opts["expiry_hint"],
