@@ -1,0 +1,36 @@
+C:\Users\gialg\Oracle\artifacts\api-server>for /f "tokens=5" %a in ('netstat -ano ^| findstr :8080') do taskkill /F /PID %a 2>nul & git pull && cd artifacts/api-server && set PORT=8080 && npm run dev
+
+C:\Users\gialg\Oracle\artifacts\api-server>taskkill /F /PID 0   2>nul  & git pull   && cd artifacts/api-server   && set PORT=8080   && npm run dev
+remote: Enumerating objects: 84, done.
+remote: Counting objects: 100% (84/84), done.
+remote: Compressing objects: 100% (22/22), done.
+remote: Total 71 (delta 43), reused 71 (delta 43), pack-reused 0 (from 0)
+Unpacking objects: 100% (71/71), 315.08 KiB | 1021.00 KiB/s, done.
+From https://github.com/creatorisnear-svg/Oracle
+   d5fe044..abedbe2  main       -> origin/main
+Updating d5fe044..abedbe2
+Fast-forward
+ artifacts/api-server/trading/agents.py             |  34 +--
+ artifacts/api-server/trading/indicators.py         |  43 +++-
+ artifacts/api-server/trading/server.py             |  92 ++++++--
+ .../src/components/mockups/TradingDashboard.tsx    | 239 ++++++++++++++++++---
+ ...nshot_20260424_203905_Discord_1777088378726.jpg | Bin 0 -> 87530 bytes
+ ...nshot_20260424_203915_Discord_1777088378663.jpg | Bin 0 -> 80078 bytes
+ ...nshot_20260424_205818_Discord_1777089515378.jpg | Bin 0 -> 213445 bytes
+ attached_assets/message-9_1777089110519.txt        |  24 +++
+ 8 files changed, 376 insertions(+), 56 deletions(-)
+ create mode 100644 attached_assets/Screenshot_20260424_203905_Discord_1777088378726.jpg
+ create mode 100644 attached_assets/Screenshot_20260424_203915_Discord_1777088378663.jpg
+ create mode 100644 attached_assets/Screenshot_20260424_205818_Discord_1777089515378.jpg
+ create mode 100644 attached_assets/message-9_1777089110519.txt
+The system cannot find the path specified.
+
+C:\Users\gialg\Oracle\artifacts\api-server>taskkill /F /PID 0   2>nul  & git pull   && cd artifacts/api-server   && set PORT=8080   && npm run dev
+Already up to date.
+The system cannot find the path specified.
+
+C:\Users\gialg\Oracle\artifacts\api-server>taskkill /F /PID 0   2>nul  & git pull   && cd artifacts/api-server   && set PORT=8080   && npm run dev
+Already up to date.
+The system cannot find the path specified.
+
+C:\Users\gialg\Oracle\artifacts\api-server>
