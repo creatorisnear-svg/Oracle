@@ -183,6 +183,14 @@ async def live_price_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(live_price_loop())
+    # Auto-refresh track_record.json + regime_stats.json on startup if stale,
+    # then every 24h. Files are local-only (gitignored) so they survive git pulls.
+    try:
+        import auto_refresh
+        auto_refresh.start_background_loop()
+        logger.info("auto_refresh: background loop scheduled")
+    except Exception as e:
+        logger.warning(f"auto_refresh: failed to start ({e})")
     yield
 
 
@@ -601,6 +609,31 @@ def learning_weights():
 @app.get("/api/learning/history/{symbol}")
 def learning_history(symbol: str):
     return LEARNING.get_history(symbol.upper())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADMIN — auto-refresh status + manual triggers for the data files
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/admin/refresh/status")
+def admin_refresh_status():
+    """How fresh are track_record.json + regime_stats.json? When were they last regenerated?"""
+    import auto_refresh
+    return auto_refresh.get_status()
+
+
+@app.post("/api/admin/refresh/track-record")
+async def admin_refresh_track_record(force: bool = False):
+    """Trigger a track-record regeneration NOW. Blocks ~1-2 minutes; returns the result."""
+    import auto_refresh
+    return await auto_refresh.refresh_track_record(force=force)
+
+
+@app.post("/api/admin/refresh/regime-stats")
+async def admin_refresh_regime_stats(force: bool = False):
+    """Trigger a regime-stats regeneration NOW. Blocks ~1-2 minutes; returns the result."""
+    import auto_refresh
+    return await auto_refresh.refresh_regime_stats(force=force)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -65,10 +65,25 @@ Each prediction includes:
 - Risk/Reward ratio, position size, agreed/disagreed agents
 
 ## Back-Testing & Tests
-- `python3 artifacts/api-server/trading/tests/test_agents.py` — 43 unit tests for all 9 agents + Judge + Kelly + track record
+- `python3 artifacts/api-server/trading/tests/test_agents.py` — 46 unit tests for all 9 agents + Judge + Kelly + track record
 - `python3 artifacts/api-server/trading/tests/backtest.py [SYMBOLS...]` — directional accuracy + target hit + forecast MAE per stock
-- `python3 artifacts/api-server/trading/tests/compute_regime_stats.py` — re-derive `regime_stats.json` from history (used by Kelly sizer)
-- `python3 artifacts/api-server/trading/tests/compute_track_record.py` — re-derive `track_record.json` (per-stock 2-year hit rates shown in UI)
+- `python3 artifacts/api-server/trading/tests/compute_regime_stats.py` — manual re-derive of `regime_stats.json` (also runs automatically — see below)
+- `python3 artifacts/api-server/trading/tests/compute_track_record.py` — manual re-derive of `track_record.json` (also runs automatically — see below)
+
+## Auto-Refresh of Data Files (`auto_refresh.py`)
+`track_record.json` and `regime_stats.json` are **local-only** (gitignored) so they survive `git pull` without merge conflicts and accumulate per-machine learning. `predictions.db` is also local-only.
+
+On server startup the FastAPI lifespan hook schedules a background task that:
+1. Checks both files; if missing or older than 7 days, regenerates them in a thread executor (~1-2 min each, non-blocking).
+2. After regeneration, hot-reloads the in-memory caches (`agents.reload_track_record()`, `kelly.reload_stats()`) — no restart needed.
+3. Sleeps 24 h, then repeats.
+
+Admin endpoints for manual control:
+- `GET  /api/admin/refresh/status` — file ages, last-refresh timestamps, stale flags
+- `POST /api/admin/refresh/track-record?force=true` — regenerate now
+- `POST /api/admin/refresh/regime-stats?force=true` — regenerate now
+
+One-time setup on a new clone: run `artifacts/api-server/trading/untrack-local-data.bat` (Windows) to remove the stale tracked copies from git's index.
 
 ## Per-Stock Track Record (`track_record.json`)
 The model's hit rate varies dramatically by symbol:

@@ -46,6 +46,14 @@ def _load_stats() -> dict:
     return _cached_stats
 
 
+def reload_stats() -> dict:
+    """Force the next _load_stats() call to re-read regime_stats.json from disk.
+    Called by the auto-refresh background task after regenerating the file."""
+    global _cached_stats
+    _cached_stats = None
+    return _load_stats()
+
+
 def regime_for_atr_pct(atr_pct: float) -> str:
     if atr_pct < 1.5: return "low_vol"
     if atr_pct > 4.0: return "high_vol"
