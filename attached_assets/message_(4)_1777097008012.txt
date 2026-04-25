@@ -1,0 +1,58 @@
+^C
+C:\Users\gialg\Oracle\artifacts\api-server>artifacts\api-server\trading\untrack-local-data.bat
+The system cannot find the path specified.
+
+C:\Users\gialg\Oracle\artifacts\api-server>cd /d C:\Users\gialg\Oracle && git checkout -- artifacts/api-server/trading/predictions.db && git pull && git rm --cached -f artifacts/api-server/trading/predictions.db artifacts/api-server/trading/track_record.json artifacts/api-server/trading/regime_stats.json && git commit -m "Stop tracking local-only data files" && git push
+remote: Enumerating objects: 46, done.
+remote: Counting objects: 100% (46/46), done.
+remote: Compressing objects: 100% (7/7), done.
+remote: Total 29 (delta 20), reused 29 (delta 20), pack-reused 0 (from 0)
+Unpacking objects: 100% (29/29), 13.31 KiB | 272.00 KiB/s, done.
+From https://github.com/creatorisnear-svg/Oracle
+   23eb0f6..a19abbc  main       -> origin/main
+Updating 23eb0f6..a19abbc
+Fast-forward
+ .gitignore                                         |  11 +
+ .replit                                            |  38 ----
+ artifacts/api-server/trading/agents.py             | 251 ++++++++++++++++++++-
+ artifacts/api-server/trading/auto_refresh.py       | 238 +++++++++++++++++++
+ artifacts/api-server/trading/kelly.py              |   8 +
+ artifacts/api-server/trading/predictions.db        | Bin 45056 -> 45056 bytes
+ artifacts/api-server/trading/server.py             |  33 +++
+ artifacts/api-server/trading/tests/__init__.py     |   0
+ .../api-server/trading/untrack-local-data.bat      |  30 +++
+ .../src/components/mockups/TradingDashboard.tsx    | 121 +++++++++-
+ replit.md                                          |  21 +-
+ 11 files changed, 691 insertions(+), 60 deletions(-)
+ create mode 100644 artifacts/api-server/trading/auto_refresh.py
+ create mode 100644 artifacts/api-server/trading/tests/__init__.py
+ create mode 100644 artifacts/api-server/trading/untrack-local-data.bat
+rm 'artifacts/api-server/trading/predictions.db'
+rm 'artifacts/api-server/trading/regime_stats.json'
+rm 'artifacts/api-server/trading/track_record.json'
+Author identity unknown
+
+*** Please tell me who you are.
+
+Run
+
+  git config --global user.email "you@example.com"
+  git config --global user.name "Your Name"
+
+to set your account's default identity.
+Omit --global to set the identity only in this repository.
+
+fatal: unable to auto-detect email address (got 'gialg@MSI.(none)')
+
+C:\Users\gialg\Oracle>git config --global user.email "Justinoceguera19@gmail.com"
+
+C:\Users\gialg\Oracle>git config --global user.name "Justin"
+
+C:\Users\gialg\Oracle>cd /d C:\Users\gialg\Oracle && git commit -m "Stop tracking local-only data files" && git push
+[main 26ab09f] Stop tracking local-only data files
+ 3 files changed, 105 deletions(-)
+ delete mode 100644 artifacts/api-server/trading/predictions.db
+ delete mode 100644 artifacts/api-server/trading/regime_stats.json
+ delete mode 100644 artifacts/api-server/trading/track_record.json
+fatal: User cancelled dialog.
+Username for 'https://github.com':
