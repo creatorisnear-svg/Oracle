@@ -650,9 +650,36 @@ async def live_price_loop():
         await asyncio.sleep(3)
 
 
+async def _periodic_outcome_verifier():
+    """
+    Every 5 minutes, scan ALL pending predictions across every symbol and
+    resolve those whose hold window has elapsed. This is what closes the
+    learning loop — without this background pass, predictions linger
+    pending forever and agent weights never update.
+    """
+    # Wait 30s on startup so we don't fight the live-price loop for yfinance bandwidth
+    await asyncio.sleep(30)
+    while True:
+        try:
+            stats = await asyncio.get_event_loop().run_in_executor(
+                None, LEARNING.verify_all_pending
+            )
+            if stats.get("resolved", 0) > 0:
+                logger.info(
+                    f"[learning] resolved {stats['resolved']}/{stats['scanned']} "
+                    f"matured predictions"
+                )
+        except Exception as e:
+            logger.warning(f"_periodic_outcome_verifier: {e}")
+        await asyncio.sleep(300)  # every 5 minutes
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(live_price_loop())
+    # Background learning-loop closer — resolves matured predictions every 5min
+    asyncio.create_task(_periodic_outcome_verifier())
+    logger.info("learning: outcome-verifier background loop scheduled")
     # Auto-refresh track_record.json + regime_stats.json on startup if stale,
     # then every 24h. Files are local-only (gitignored) so they survive git pulls.
     try:
@@ -1051,9 +1078,17 @@ def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
             target_price=judgment["target_price"],
             stop_loss=judgment["stop_loss"],
             agent_votes={v["agent"]: v["vote"] for v in votes},
+            horizon=h["key"],
         )
         try:
             meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
+        except Exception:
+            pass
+        # Opportunistic outcome verification — closes the learning loop on
+        # REST traffic too (not just the websocket path). Cheap when nothing
+        # has matured; the periodic background loop is the real workhorse.
+        try:
+            LEARNING.verify_outcomes(sym)
         except Exception:
             pass
         safe_ind = _sanitize(ind)
@@ -1362,18 +1397,18 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             target_price=judgment["target_price"],
             stop_loss=judgment["stop_loss"],
             agent_votes={v["agent"]: v["vote"] for v in votes},
+            horizon=h_cfg["key"],
         )
         try:
             meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
         except Exception:
             pass
 
-        # 7. Verify past outcomes
-        if live.get("price", 0):
-            try:
-                LEARNING.verify_outcomes(sym, live["price"])
-            except Exception:
-                pass
+        # 7. Verify past outcomes (opportunistic — periodic loop is the workhorse)
+        try:
+            LEARNING.verify_outcomes(sym)
+        except Exception:
+            pass
 
         # 8. Accuracy snapshot
         accuracy = {}

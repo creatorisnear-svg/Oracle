@@ -1,4 +1,51 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.3
+# TradeSignal AI — 9-Agent Trading Prediction System v6.4
+
+## Learning-loop fix (v6.4) — the AIs actually learn now
+Audit revealed the system was logging predictions but **never resolving
+them** — 129 predictions in the DB, 0 resolved, agent weights frozen at
+bootstrap values forever. Four bugs in the verification path, all fixed:
+
+1. **No per-horizon maturity windows.** Old code waited 24 hours for
+   every prediction regardless of horizon. Intraday (1-2h hold) and day
+   (rest of session) never matured — they were stale before they were
+   ripe. New `HORIZON_WINDOW_HOURS = {intraday: 2, day: 6, swing: 5d,
+   position: 14d}` matches each horizon's intended hold time.
+
+2. **Verification ignored target/stop.** Old code marked `correct =
+   pct_change >= 0.5%` at one moment in time — a CALL that hit target
+   then reversed got marked wrong; a CALL that got stopped out then
+   bounced got marked right. New `verify_outcomes` pulls real OHLC
+   bars across the hold window from yfinance and walks them
+   chronologically to determine which level (target or stop) was hit
+   first. If neither hits, judges by net direction at window close.
+
+3. **REST endpoint never triggered verification.** Only the websocket
+   path called `verify_outcomes`. Now `/api/analyze` triggers it
+   opportunistically too, and a new periodic background task
+   (`_periodic_outcome_verifier`) scans every 5 minutes for matured
+   pendings across all symbols. This is the workhorse — without it
+   predictions linger forever.
+
+4. **Per-agent grading was wrong.** Old code:
+   `agent_correct = (agent_vote == system_signal) == was_correct`
+   measured agreement-with-Judge, not whether the agent's own call was
+   right. An agent voting CALL on a real up-move got marked WRONG if
+   the Judge held. New `_grade_agent_vote` grades each agent
+   independently against the actual price direction during the hold
+   window — exactly as a fair scorer would.
+
+**Schema migration:** `predictions` table gained a `horizon` column
+(default `'swing'` for back-compat with existing rows). Both
+save_prediction call sites in `server.py` now pass the correct horizon.
+
+**Verification** (forced one row to mature with Friday Apr 24 OHLC):
+real bars walked, stop-hit detected before target, `outcome=WRONG`
+recorded, per-agent grading confirmed independent of system signal
+(CALL voters got `was_correct=1` even though system trade got stopped
+because the actual move was upward). `agent_weights` table updated
+with `total_predictions=1`, `correct_predictions` per agent — weights
+will start adjusting once each agent reaches the 5-prediction Bayesian
+prior threshold.
 
 ## Signal-rate fixes (v6.3)
 The audit revealed the system was producing too many HOLDs: 100% HOLD on
