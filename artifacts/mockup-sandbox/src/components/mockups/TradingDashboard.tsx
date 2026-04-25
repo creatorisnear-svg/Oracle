@@ -337,7 +337,7 @@ export default function TradingDashboard() {
       layout: { background: { type: ColorType.Solid, color: "#0f172a" }, textColor: "#94a3b8" },
       grid: { vertLines: { color: "#1e293b" }, horzLines: { color: "#1e293b" } },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: "#334155", scaleMarginTop: 0.1, scaleMarginBottom: 0.2 },
+      rightPriceScale: { borderColor: "#334155", scaleMargins: { top: 0.1, bottom: 0.2 } },
       timeScale: { borderColor: "#334155", timeVisible: true },
     });
     chartRef.current = chart;
@@ -404,7 +404,7 @@ export default function TradingDashboard() {
 
       // Volume buy/sell histogram — green = buying pressure, red = selling pressure
       if (indicators_visible.vol && data.volume?.length) {
-        chart.priceScale('right').applyOptions({ scaleMarginTop: 0.05, scaleMarginBottom: 0.28 });
+        chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.05, bottom: 0.28 } });
         const volSeries = chart.addSeries(HistogramSeries, {
           priceFormat: { type: 'volume' },
           priceScaleId: 'vol',
