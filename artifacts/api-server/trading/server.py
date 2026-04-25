@@ -895,8 +895,10 @@ def options_chain(symbol: str, expiry: str = ""):
                 bid   = safe_float(r.get("bid", 0))
                 ask   = safe_float(r.get("ask", 0))
                 mid   = round((bid + ask) / 2, 2) if bid and ask else last
-                vol   = int(r.get("volume", 0) or 0)
-                oi    = int(r.get("openInterest", 0) or 0)
+                # NaN-safe int coercion — yfinance often returns NaN for thinly
+                # traded strikes and `int(NaN)` raises ValueError.
+                vol   = int(safe_float(r.get("volume", 0), 0))
+                oi    = int(safe_float(r.get("openInterest", 0), 0))
                 iv    = round(safe_float(r.get("impliedVolatility", 0)) * 100, 1)
                 itm   = bool(r.get("inTheMoney", False))
                 delta_est = 0.0

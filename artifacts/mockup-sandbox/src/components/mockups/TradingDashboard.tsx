@@ -62,6 +62,9 @@ interface Judgment {
   expiry_weekly: string; expiry_biweekly: string; expiry_monthly: string;
   entry_trigger: string; risk_note: string;
   forecast_line?: { time: number; value: number }[];
+  post_forecast_line?: { time: number; value: number }[];
+  post_forecast_mode?: "continuation" | "reversion" | "drift" | null;
+  post_forecast_note?: string;
   fear_greed_score?: number; fear_greed_label?: string;
   kelly?: {
     kelly_pct: number; dollars_per_10k: number; regime: string;
@@ -314,6 +317,7 @@ export default function TradingDashboard() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<any>(null);
   const forecastRef = useRef<any>(null);
+  const postForecastRef = useRef<any>(null);
   const targetLineRef = useRef<any>(null);
   const stopLineRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -328,6 +332,7 @@ export default function TradingDashboard() {
       chartRef.current = null;
       candleRef.current = null;
       forecastRef.current = null;
+      postForecastRef.current = null;
       targetLineRef.current = null;
       stopLineRef.current = null;
     }
@@ -447,32 +452,80 @@ export default function TradingDashboard() {
 
     // Remove old forecast
     if (forecastRef.current) { try { chartRef.current.removeSeries(forecastRef.current); } catch {} forecastRef.current = null; }
+    if (postForecastRef.current) { try { chartRef.current.removeSeries(postForecastRef.current); } catch {} postForecastRef.current = null; }
     if (targetLineRef.current) { try { chartRef.current.removeSeries(targetLineRef.current); } catch {} targetLineRef.current = null; }
     if (stopLineRef.current) { try { chartRef.current.removeSeries(stopLineRef.current); } catch {} stopLineRef.current = null; }
 
     if (j.signal === "HOLD") return;
 
+    // ── Main prediction line — solid + thick + titled "PREDICTION"
+    // Solid (not dashed) so it looks like a real continuation of the price
+    // chart; the title legend tells the user which line is the model's call.
     const forecast = chartRef.current.addSeries(LineSeries, {
-      color: st.hex, lineWidth: 2, lineStyle: 3,
-      crosshairMarkerVisible: true,
+      color: st.hex, lineWidth: 3, lineStyle: 0,
+      title: `PREDICTION (${j.signal === "BUY_CALL" ? "↑ CALL" : "↓ PUT"})`,
+      crosshairMarkerVisible: true, lastValueVisible: true,
     });
     forecast.setData(j.forecast_line.map(p => ({ time: p.time as UTCTimestamp, value: p.value })));
     forecastRef.current = forecast;
 
+    // Mark the start of the prediction so it's obvious where "now" ends and
+    // the model's projection begins.
+    const startTs = j.forecast_line[0].time as UTCTimestamp;
+    createSeriesMarkers(forecast, [{
+      time: startTs, position: "inBar", color: st.hex, shape: "circle",
+      text: "PREDICTION START",
+    }]);
+
+    // ── Post-prediction line — what the model thinks happens AFTER target/stop
+    // Distinct color (amber) + dashed so it reads as "this is what's likely
+    // after the trade closes — sell here, don't hold". The legend title
+    // includes the mode so the trader instantly sees if it's a continuation
+    // or a reversion.
+    if (j.post_forecast_line?.length) {
+      const modeLabel =
+        j.post_forecast_mode === "continuation" ? "CONTINUES ↑" :
+        j.post_forecast_mode === "reversion"    ? "PULLS BACK ↓" :
+                                                   "DRIFTS";
+      const postColor = j.post_forecast_mode === "continuation" ? st.hex
+                       : j.post_forecast_mode === "reversion" ? "#f59e0b"
+                       : "#94a3b8";
+      const post = chartRef.current.addSeries(LineSeries, {
+        color: postColor, lineWidth: 2, lineStyle: 2,
+        title: `AFTER PREDICTION — ${modeLabel}`,
+        crosshairMarkerVisible: true, lastValueVisible: false,
+      });
+      // Bridge from the last forecast point so the lines visually connect
+      const bridged = [
+        { time: j.forecast_line[j.forecast_line.length - 1].time as UTCTimestamp,
+          value: j.forecast_line[j.forecast_line.length - 1].value },
+        ...j.post_forecast_line.map(p => ({ time: p.time as UTCTimestamp, value: p.value })),
+      ];
+      post.setData(bridged);
+      postForecastRef.current = post;
+    }
+
+    // ── Target & stop horizontal levels (now span the full forecast incl. post)
+    const lastWindowTs = (j.post_forecast_line?.length
+      ? j.post_forecast_line[j.post_forecast_line.length - 1].time
+      : j.forecast_line[j.forecast_line.length - 1].time) as UTCTimestamp;
+
     if (j.target_price) {
-      const tgt = chartRef.current.addSeries(LineSeries, { color: "#10b981", lineWidth: 1, lineStyle: 1 });
+      const tgt = chartRef.current.addSeries(LineSeries, {
+        color: "#10b981", lineWidth: 1, lineStyle: 1, title: `TARGET $${j.target_price}`,
+      });
       const ts0 = j.forecast_line[0].time as UTCTimestamp;
-      const ts1 = j.forecast_line[j.forecast_line.length - 1].time as UTCTimestamp;
-      tgt.setData([{ time: ts0, value: j.target_price }, { time: ts1, value: j.target_price }]);
-      createSeriesMarkers(tgt, [{ time: ts1, position: "aboveBar", color: "#10b981", shape: "arrowUp", text: `TARGET $${j.target_price}` }]);
+      tgt.setData([{ time: ts0, value: j.target_price }, { time: lastWindowTs, value: j.target_price }]);
+      createSeriesMarkers(tgt, [{ time: lastWindowTs, position: "aboveBar", color: "#10b981", shape: "arrowUp", text: `TARGET $${j.target_price}` }]);
       targetLineRef.current = tgt;
     }
     if (j.stop_loss) {
-      const stp = chartRef.current.addSeries(LineSeries, { color: "#ef4444", lineWidth: 1, lineStyle: 1 });
+      const stp = chartRef.current.addSeries(LineSeries, {
+        color: "#ef4444", lineWidth: 1, lineStyle: 1, title: `STOP $${j.stop_loss}`,
+      });
       const ts0 = j.forecast_line[0].time as UTCTimestamp;
-      const ts1 = j.forecast_line[j.forecast_line.length - 1].time as UTCTimestamp;
-      stp.setData([{ time: ts0, value: j.stop_loss }, { time: ts1, value: j.stop_loss }]);
-      createSeriesMarkers(stp, [{ time: ts1, position: "belowBar", color: "#ef4444", shape: "arrowDown", text: `STOP $${j.stop_loss}` }]);
+      stp.setData([{ time: ts0, value: j.stop_loss }, { time: lastWindowTs, value: j.stop_loss }]);
+      createSeriesMarkers(stp, [{ time: lastWindowTs, position: "belowBar", color: "#ef4444", shape: "arrowDown", text: `STOP $${j.stop_loss}` }]);
       stopLineRef.current = stp;
     }
     chartRef.current.timeScale().scrollToRealTime();
@@ -1237,6 +1290,28 @@ export default function TradingDashboard() {
                       <div className="text-xs text-slate-500 font-semibold">RISK NOTE</div>
                       <div className="text-sm text-slate-200 leading-relaxed">{judgment.risk_note}</div>
                     </div>
+                    {judgment.post_forecast_note && (
+                      <div className={`rounded-xl p-3 space-y-1 border ${
+                        judgment.post_forecast_mode === "continuation"
+                          ? "bg-emerald-900/20 border-emerald-800/50"
+                          : judgment.post_forecast_mode === "reversion"
+                          ? "bg-amber-900/20 border-amber-800/50"
+                          : "bg-slate-800/60 border-slate-700"
+                      }`}>
+                        <div className="text-xs text-slate-400 font-semibold flex items-center gap-2">
+                          AFTER PREDICTION
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+                            judgment.post_forecast_mode === "continuation" ? "bg-emerald-500/30 text-emerald-300" :
+                            judgment.post_forecast_mode === "reversion"    ? "bg-amber-500/30 text-amber-300" :
+                                                                              "bg-slate-500/30 text-slate-300"
+                          }`}>
+                            {judgment.post_forecast_mode === "continuation" ? "CONTINUES" :
+                             judgment.post_forecast_mode === "reversion"    ? "PULLS BACK" : "DRIFTS"}
+                          </span>
+                        </div>
+                        <div className="text-sm text-slate-200 leading-relaxed">{judgment.post_forecast_note}</div>
+                      </div>
+                    )}
                     <div className="grid grid-cols-2 gap-2">
                       <div className="bg-emerald-900/30 border border-emerald-800/50 rounded-xl p-3 text-center">
                         <div className="text-xs text-slate-500 mb-1">TARGET</div>

@@ -1952,16 +1952,125 @@ class JudgeAgent:
             full_move = abs(target - price)
             max_move = full_move * conf_scale
 
+            # Realistic intra-trade noise — markets don't move in clean S-curves.
+            # Add a small zig-zag on top of the trend so the prediction line
+            # visually resembles real price action (mini pullbacks within the
+            # broader move). Amplitude is scaled to ATR so it's never larger
+            # than the noise the stock actually exhibits.
+            noise_amp = float(atr) * 0.18 if atr else 0.0
             n = max(len(forecast_ts), 1)
+            target_hit_idx = None  # remember when (if ever) target gets touched
+
             for i, ts in enumerate(forecast_ts):
                 progress = (i + 1) / n
                 ease = progress * progress * (3 - 2 * progress)  # smooth S-curve
                 delta = max_move * ease
+                # Sinusoidal pullback overlay — 1.5 cycles across the window
+                wiggle = noise_amp * np.sin(progress * np.pi * 3.0) * (1.0 - progress * 0.4)
                 if signal == "BUY_CALL":
-                    proj = min(price + delta, target)
+                    proj = price + delta - abs(wiggle) * 0.5 + wiggle * 0.5
+                    proj = min(proj, target)
+                    if target_hit_idx is None and proj >= target - 1e-6:
+                        target_hit_idx = i
                 else:
-                    proj = max(price - delta, target)
+                    proj = price - delta + abs(wiggle) * 0.5 - wiggle * 0.5
+                    proj = max(proj, target)
+                    if target_hit_idx is None and proj <= target + 1e-6:
+                        target_hit_idx = i
                 forecast.append({"time": ts, "value": round(proj, 2)})
+
+        # ── Post-prediction continuation ────────────────────────────────────
+        # The trader's ACTUAL question isn't just "will target hit?" — it's
+        # "what happens AFTER target hits, so I know whether to take profits
+        # at the target or let it run?". A correct CALL that hits target then
+        # collapses 4% is a losing trade if you held. So we project a few extra
+        # bars beyond the main forecast showing the most likely follow-through:
+        #   • Strong trend (ADX≥25) + aligned HTF  → continuation, target × 1.3
+        #   • Weak trend or RSI extreme (>70/<30)  → mean reversion pullback
+        #   • Mixed                                → drift back toward entry
+        # This is what tells the user "take profit at target, don't get greedy".
+        post_forecast = []
+        post_forecast_mode = None
+        post_forecast_note = ""
+        if signal != "HOLD" and forecast:
+            last_pt = forecast[-1]
+            last_ts = int(last_pt["time"])
+            last_val = float(last_pt["value"])
+            adx_val = safe_float(ind.get("adx", 0))
+            rsi_val = safe_float(ind.get("rsi", 50))
+            htf_dir = (weekly.get("dir") if isinstance(weekly, dict) else "flat") or "flat"
+
+            extreme_overbought = signal == "BUY_CALL" and rsi_val >= 72
+            extreme_oversold   = signal == "BUY_PUT"  and rsi_val <= 28
+            strong_trend = adx_val >= 25
+            htf_aligned = (
+                (signal == "BUY_CALL" and htf_dir == "up") or
+                (signal == "BUY_PUT"  and htf_dir == "down")
+            )
+
+            if extreme_overbought or extreme_oversold:
+                post_forecast_mode = "reversion"
+                post_forecast_note = (
+                    f"RSI {rsi_val:.0f} is extreme — expect a pullback after target. "
+                    "Take profits at target rather than holding."
+                )
+            elif strong_trend and htf_aligned:
+                post_forecast_mode = "continuation"
+                post_forecast_note = (
+                    f"Strong trend (ADX {adx_val:.0f}) aligned with weekly {htf_dir}. "
+                    "Target may overshoot — consider trailing stop."
+                )
+            else:
+                post_forecast_mode = "drift"
+                post_forecast_note = (
+                    "Mixed follow-through — price likely drifts back toward entry "
+                    "after target. Don't hold past the target."
+                )
+
+            # Build the post-window timestamps (continue same cadence)
+            post_ts: list[int] = []
+            extra_bars = max(3, forecast_bars // 3)
+            dt2 = datetime.fromtimestamp(last_ts, tz=timezone.utc)
+            if bar_minutes >= 24 * 60:
+                while len(post_ts) < extra_bars:
+                    dt2 += timedelta(days=1)
+                    if dt2.weekday() < 5:
+                        post_ts.append(int(dt2.timestamp()))
+            else:
+                step = timedelta(minutes=bar_minutes)
+                guard = 0
+                while len(post_ts) < extra_bars and guard < extra_bars * 80:
+                    dt2 = dt2 + step
+                    guard += 1
+                    if dt2.weekday() >= 5:
+                        days_to_mon = 7 - dt2.weekday()
+                        dt2 = (dt2 + timedelta(days=days_to_mon)).replace(hour=13, minute=30, second=0, microsecond=0)
+                        continue
+                    t2 = dt2.time()
+                    if dtime(13, 30) <= t2 <= dtime(20, 0):
+                        post_ts.append(int(dt2.timestamp()))
+                    elif t2 > dtime(20, 0):
+                        dt2 = (dt2 + timedelta(days=1)).replace(hour=13, minute=30, second=0, microsecond=0)
+
+            # Project the post-window values per mode
+            move_atr = float(atr) if atr else (last_val * 0.005)
+            for j, ts in enumerate(post_ts):
+                p2 = (j + 1) / max(len(post_ts), 1)
+                if post_forecast_mode == "continuation":
+                    # Keep going in trade direction, decelerating
+                    extra = move_atr * 0.6 * (1 - (1 - p2) ** 2)
+                    val = last_val + extra if signal == "BUY_CALL" else last_val - extra
+                elif post_forecast_mode == "reversion":
+                    # Pull back ~50% of the trade move toward entry
+                    pullback = abs(last_val - entry) * 0.5 * p2
+                    val = last_val - pullback if signal == "BUY_CALL" else last_val + pullback
+                else:  # drift
+                    # Slow drift ~20% back toward entry
+                    pullback = abs(last_val - entry) * 0.2 * p2
+                    val = last_val - pullback if signal == "BUY_CALL" else last_val + pullback
+                # Light noise to mirror real-tape feel
+                val += np.sin((j + 1) * 1.7) * move_atr * 0.08
+                post_forecast.append({"time": ts, "value": round(val, 2)})
 
         vola = ind.get("volatility_20d", 25)
         pos_size = max(1, 5 - int(vola / 15))
@@ -2072,6 +2181,9 @@ class JudgeAgent:
             "entry_trigger": opts["entry_trigger"],
             "risk_note": opts["risk_note"],
             "forecast_line": forecast,
+            "post_forecast_line": post_forecast,
+            "post_forecast_mode": post_forecast_mode,
+            "post_forecast_note": post_forecast_note,
             "fear_greed_score": fg_score,
             "fear_greed_label": fg_label,
         }
