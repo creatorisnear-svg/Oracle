@@ -971,6 +971,22 @@ def learning_status():
         return {"status": "error", "error": str(e)}
 
 
+@app.get("/api/learning-events")
+def learning_events(limit: int = 30):
+    """Recent agent weight-change events.
+
+    Each item is a single resolved vote with the weight value before and
+    after the formula re-application. Powers the live "AI is learning" feed
+    in the dashboard so the user can watch weights move in real time.
+    """
+    try:
+        events = LEARNING.get_weight_history(limit)
+        return {"status": "ok", "count": len(events), "events": events}
+    except Exception as e:
+        logger.error(f"learning_events error: {e}")
+        return {"status": "error", "error": str(e), "events": []}
+
+
 @app.post("/api/learning-backup")
 def learning_backup_now():
     """Manually trigger a snapshot of predictions.db. Returns the new

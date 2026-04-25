@@ -534,6 +534,69 @@ def get_accuracy_stats() -> dict:
     }
 
 
+def get_weight_history(limit: int = 30) -> list:
+    """Return the most recent agent weight-change events.
+
+    Each row in `agent_performance` is one resolved vote. Walking those rows
+    chronologically and re-applying the same Bayesian-smoothing formula that
+    `_recalculate_weights` uses gives us the weight value before AND after
+    each event — so the UI can show a literal feed of the AI learning.
+
+    The formula has a "warm-up" floor: agents with <5 graded votes stay at
+    their initial weight (1.0). We surface that as `phase: "warmup"` so the
+    UI can show "still learning" instead of a deceptive 0.00 delta.
+    """
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT id, agent_name, symbol, vote, system_signal, was_correct, created_at
+        FROM agent_performance
+        ORDER BY id ASC
+    """).fetchall()
+    conn.close()
+
+    # Cumulative per-agent stats as we replay history forward
+    running: dict[str, dict[str, int]] = {}
+    events: list[dict] = []
+
+    def _weight(agent: str, total: int, correct: int) -> tuple[float, str]:
+        if total >= 5:
+            accuracy = (correct + 1) / (total + 2)
+            return round(0.5 + accuracy, 4), "active"
+        return round(INITIAL_WEIGHTS.get(agent, 1.0), 4), "warmup"
+
+    for r in rows:
+        agent = r["agent_name"]
+        st = running.setdefault(agent, {"total": 0, "correct": 0})
+        before_total, before_correct = st["total"], st["correct"]
+        w_before, phase_before = _weight(agent, before_total, before_correct)
+
+        st["total"] += 1
+        st["correct"] += int(r["was_correct"] or 0)
+        after_total, after_correct = st["total"], st["correct"]
+        w_after, phase_after = _weight(agent, after_total, after_correct)
+
+        events.append({
+            "id": r["id"],
+            "agent": agent,
+            "symbol": r["symbol"],
+            "vote": r["vote"],
+            "system_signal": r["system_signal"],
+            "was_correct": int(r["was_correct"] or 0),
+            "created_at": r["created_at"],
+            "weight_before": w_before,
+            "weight_after": w_after,
+            "delta": round(w_after - w_before, 4),
+            "phase": phase_after,
+            "phase_before": phase_before,
+            "total_after": after_total,
+            "correct_after": after_correct,
+        })
+
+    # Newest first, capped to `limit`
+    events.reverse()
+    return events[:limit]
+
+
 def get_recent_predictions(symbol: str, limit: int = 20) -> list:
     conn = get_conn()
     rows = conn.execute("""
@@ -619,3 +682,11 @@ class LearningSystem:
             "symbol": symbol,
             "history": get_recent_predictions(symbol),
         }
+
+    def get_weight_history(self, limit: int = 30) -> list:
+        """Recent agent weight-change events for the 'AI is learning' feed."""
+        try:
+            return get_weight_history(limit)
+        except Exception as e:
+            logger.warning(f"get_weight_history: {e}")
+            return []

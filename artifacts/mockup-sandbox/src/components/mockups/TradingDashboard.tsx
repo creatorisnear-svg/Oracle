@@ -107,6 +107,22 @@ interface AccuracyReport {
   overall_win_rate?: number; total_predictions?: number;
   correct_predictions?: number; agents?: AccuracyAgent[];
 }
+interface LearningEvent {
+  id: number;
+  agent: string;
+  symbol: string;
+  vote: string;
+  system_signal: string;
+  was_correct: number;
+  created_at: string;
+  weight_before: number;
+  weight_after: number;
+  delta: number;
+  phase: "warmup" | "active";
+  phase_before: "warmup" | "active";
+  total_after: number;
+  correct_after: number;
+}
 interface LearningStatus {
   status?: string;
   db_path?: string;
@@ -321,6 +337,7 @@ export default function TradingDashboard() {
   const [stockSentiment, setStockSentiment] = useState<StockSentiment | null>(null);
   const [accuracy, setAccuracy] = useState<AccuracyReport | null>(null);
   const [learning, setLearning] = useState<LearningStatus | null>(null);
+  const [learningEvents, setLearningEvents] = useState<LearningEvent[]>([]);
   const [backupBusy, setBackupBusy] = useState(false);
   const [fearLoading, setFearLoading] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -728,8 +745,15 @@ export default function TradingDashboard() {
   // and that their data is backed up against accidental file resets.
   const loadLearning = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/learning-status`);
-      if (res.ok) { const d = await res.json(); setLearning(d); }
+      const [statusRes, eventsRes] = await Promise.all([
+        fetch(`${API_BASE}/learning-status`),
+        fetch(`${API_BASE}/learning-events?limit=30`),
+      ]);
+      if (statusRes.ok) { const d = await statusRes.json(); setLearning(d); }
+      if (eventsRes.ok) {
+        const d = await eventsRes.json();
+        setLearningEvents(Array.isArray(d.events) ? d.events : []);
+      }
     } catch {}
   }, []);
 
@@ -1723,6 +1747,74 @@ export default function TradingDashboard() {
                     )}
                   </div>
                 )}
+
+                {/* ── Live "AI is learning" feed ─────────────────────────────
+                    Each row is one resolved vote with the weight value
+                    BEFORE and AFTER, so you literally watch the agents move
+                    on the leaderboard as outcomes roll in. */}
+                <div className="rounded-xl bg-slate-800/50 border border-slate-700 p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-bold text-slate-200 uppercase tracking-wide">
+                      Learning Feed
+                    </div>
+                    <span className="text-[10px] text-slate-500">
+                      last {Math.min(learningEvents.length, 30)} weight changes
+                    </span>
+                  </div>
+                  {learningEvents.length === 0 ? (
+                    <div className="text-[11px] text-slate-500 italic py-2 text-center">
+                      No resolved votes yet — feed populates as predictions hit
+                      their hold window and get graded.
+                    </div>
+                  ) : (
+                    <div className="max-h-72 overflow-y-auto space-y-1 pr-1">
+                      {learningEvents.map((ev) => {
+                        const isWin = ev.was_correct === 1;
+                        const isCall = ev.vote === "BUY_CALL";
+                        const isPut = ev.vote === "BUY_PUT";
+                        const voteLabel = isCall ? "CALL" : isPut ? "PUT" : "HOLD";
+                        const voteColor = isCall ? "text-emerald-400"
+                                          : isPut ? "text-red-400"
+                                          : "text-slate-400";
+                        const moved = ev.delta !== 0;
+                        const arrow = ev.delta > 0 ? "▲" : ev.delta < 0 ? "▼" : "·";
+                        const deltaColor = ev.delta > 0 ? "text-emerald-400"
+                                           : ev.delta < 0 ? "text-red-400"
+                                           : "text-slate-500";
+                        // Compact relative time (fits in the row)
+                        let rel = "";
+                        try {
+                          const ts = new Date(ev.created_at).getTime();
+                          const mins = Math.max(0, Math.round((Date.now() - ts) / 60000));
+                          rel = mins < 60 ? `${mins}m ago`
+                              : mins < 1440 ? `${Math.round(mins / 60)}h ago`
+                              : `${Math.round(mins / 1440)}d ago`;
+                        } catch {}
+                        return (
+                          <div key={ev.id} className="flex items-center gap-2 text-[11px] bg-slate-900/40 rounded px-2 py-1">
+                            <span className={`font-bold ${isWin ? "text-emerald-400" : "text-red-400"} w-7 flex-shrink-0`}>
+                              {isWin ? "WIN" : "LOSS"}
+                            </span>
+                            <span className="text-slate-200 truncate flex-1 min-w-0">
+                              {ev.agent} · <span className="text-slate-500">{ev.symbol}</span>
+                              {" "}<span className={voteColor}>{voteLabel}</span>
+                            </span>
+                            <span className="font-mono text-slate-500 text-[10px] hidden sm:inline">
+                              {ev.weight_before.toFixed(2)}→{ev.weight_after.toFixed(2)}
+                            </span>
+                            <span className={`font-mono font-bold ${deltaColor} w-14 text-right flex-shrink-0`}>
+                              {moved ? `${arrow} ${ev.delta > 0 ? "+" : ""}${ev.delta.toFixed(3)}`
+                                     : ev.phase === "warmup" ? "warmup" : "·"}
+                            </span>
+                            <span className="text-slate-600 text-[10px] w-14 text-right flex-shrink-0">
+                              {rel}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
 
                 <div className="text-xs text-slate-500 font-semibold uppercase">AI Agent Accuracy Log</div>
                 {accuracy ? (
