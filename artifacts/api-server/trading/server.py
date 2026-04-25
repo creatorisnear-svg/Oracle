@@ -1313,9 +1313,13 @@ async def paper_close(position_id: int):
     target = next((p for p in rows if p["id"] == position_id), None)
     if not target:
         return {"error": "position not found or already closed"}
+    # Manual close should never fail on a price lookup. Try live first,
+    # then fall back to entry price so the user can always close out.
     price = _live_price(target["symbol"])
-    if price is None:
-        return {"error": "could not get live price"}
+    if price is None or price <= 0:
+        price = safe_float(target.get("entry_price") or 0)
+    if price <= 0:
+        return {"error": "no usable price for close"}
     closed = paper_trading.close_position(position_id, price, reason="manual")
     if not closed:
         return {"error": "close failed"}

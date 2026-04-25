@@ -815,25 +815,54 @@ export default function TradingDashboard() {
     } catch (e: any) { showPaperToast(`Trade failed: ${e?.message || e}`); }
     finally { setPaperLoading(false); }
   }, [judgment, symbol, horizon, loadPaperData]);
+  const clearPredictionOverlay = useCallback(() => {
+    if (!chartRef.current) return;
+    for (const ref of [forecastRef, postForecastRef, targetLineRef, stopLineRef]) {
+      if (ref.current) {
+        try { chartRef.current.removeSeries(ref.current); } catch {}
+        ref.current = null;
+      }
+    }
+  }, []);
   const closePaperPosition = useCallback(async (id: number) => {
+    const closingPos = paperOpen.find(p => p.id === id);
+    // Optimistically hide it from the open list so the UI never feels stuck
+    setPaperOpen(prev => prev.filter(p => p.id !== id));
     try {
       setPaperLoading(true);
       const res = await fetch(`${API_BASE}/paper/close/${id}`, { method: "POST" });
       const data = await res.json();
-      if (data.error) showPaperToast(data.error);
-      else {
-        showPaperToast(`Closed ${data.symbol} → P/L $${(data.pnl || 0).toFixed(2)}`);
+      if (data.error) {
+        showPaperToast(data.error);
+        // Roll back the optimistic removal
         await loadPaperData();
+        return;
       }
+      showPaperToast(`Closed ${data.symbol} → P/L $${(data.pnl || 0).toFixed(2)}`);
+      // Wipe the prediction overlay (target / stop / forecast lines) for the
+      // closed symbol so the chart reflects that the trade is over.
+      if (closingPos?.symbol === symbol) {
+        clearPredictionOverlay();
+        setJudgment(null);
+      }
+      await loadPaperData();
+    } catch (e: any) {
+      showPaperToast(`Close failed: ${e?.message || e}`);
+      await loadPaperData();
     } finally { setPaperLoading(false); }
-  }, [loadPaperData]);
+  }, [loadPaperData, paperOpen, symbol, clearPredictionOverlay]);
   const resetPaperAccount = useCallback(async () => {
     if (!confirm("Reset paper account to $10,000 and close all positions?")) return;
     setPaperLoading(true);
-    await fetch(`${API_BASE}/paper/reset`, { method: "POST" });
-    await loadPaperData();
-    showPaperToast("Account reset to $10,000");
-  }, [loadPaperData]);
+    try {
+      await fetch(`${API_BASE}/paper/reset`, { method: "POST" });
+      // Reset closes everything — clear the chart overlay too
+      clearPredictionOverlay();
+      setJudgment(null);
+      await loadPaperData();
+      showPaperToast("Account reset to $10,000");
+    } finally { setPaperLoading(false); }
+  }, [loadPaperData, clearPredictionOverlay]);
 
   useEffect(() => {
     loadFearGreed();
@@ -914,7 +943,7 @@ export default function TradingDashboard() {
 
   const WATCHLIST = ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "QQQ", "AMZN", "META", "AMD", "COIN"];
   const TAB_CLASSES = (t: string) =>
-    `px-2 py-1.5 text-[11px] font-semibold rounded-md transition-all cursor-pointer text-center whitespace-nowrap ${tab === t ? "bg-blue-600 text-white shadow-md shadow-blue-500/20" : "text-slate-400 hover:text-white hover:bg-slate-700/70"}`;
+    `relative px-3 py-2 text-[11px] font-semibold tracking-wide cursor-pointer whitespace-nowrap transition-colors shrink-0 ${tab === t ? "text-white" : "text-slate-500 hover:text-slate-200"}`;
 
   const stj = judgment ? signalStyle(judgment.signal) : signalStyle("HOLD");
   const callPct = votes.length ? Math.round(votes.filter(v => v.vote === "BUY_CALL").length / votes.length * 100) : 0;
