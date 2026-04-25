@@ -37,7 +37,26 @@ HORIZON_FETCH_INTERVAL = {
 }
 # How big a move needs to be before we say it's a "real" directional move
 # when grading individual agents. Below this, the move is noise and HOLD wins.
-AGENT_GRADE_NOISE_PCT = 0.005   # 0.5%
+# MUST scale with horizon — for a 14-day position window, 0.5% is below noise
+# (almost any stock has a 0.5% excursion intraday), which previously made
+# HOLD votes systematically grade WRONG on swing/position. The thresholds
+# below are ~ATR-equivalent for a typical liquid US large-cap at each horizon.
+AGENT_GRADE_NOISE_BY_HORIZON = {
+    "intraday": 0.003,   # 0.30% — 5-min noise
+    "day":      0.005,   # 0.50% — same-session move
+    "swing":    0.015,   # 1.50% — multi-day excursion
+    "position": 0.030,   # 3.00% — multi-week excursion
+}
+# Back-compat constant — used as a fallback when horizon is unknown.
+AGENT_GRADE_NOISE_PCT = 0.005
+
+
+def _noise_threshold(horizon: str) -> float:
+    """Return the per-horizon flat-zone threshold used to decide if a move
+    was 'real' (up/down) versus 'flat' for grading purposes."""
+    return AGENT_GRADE_NOISE_BY_HORIZON.get(
+        (horizon or "swing").lower(), AGENT_GRADE_NOISE_PCT
+    )
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "predictions.db")
 
@@ -218,10 +237,15 @@ def _fetch_window_ohlc(symbol: str, start: datetime, end: datetime,
 
 
 def _resolve_target_vs_stop(df, entry: float, target: float, stop: float,
-                            signal: str) -> tuple[str, float]:
+                            signal: str, horizon: str = "swing") -> tuple[str, float]:
     """
     Walk OHLC bars in chronological order and determine which level was hit
     first — target or stop. Returns (outcome, exit_price).
+
+    Same-bar ambiguity rule: when both target and stop are hit inside the
+    SAME bar, we use the bar's open to break the tie. If the bar opened
+    closer to the target than the stop, target was probably hit first
+    (the bar gapped/moved through it). Otherwise stop wins (conservative).
 
     outcome ∈ {"TARGET_HIT", "STOP_HIT", "TIMEOUT_UP", "TIMEOUT_DOWN", "TIMEOUT_FLAT"}
     """
@@ -229,22 +253,28 @@ def _resolve_target_vs_stop(df, entry: float, target: float, stop: float,
         return ("TIMEOUT_FLAT", entry)
 
     last_close = float(df["Close"].iloc[-1])
+    has_open = "Open" in df.columns
 
     for _, bar in df.iterrows():
         hi = float(bar["High"])
         lo = float(bar["Low"])
+        op = float(bar["Open"]) if has_open else (hi + lo) / 2
 
         if signal == "BUY_CALL":
             target_hit = hi >= target
             stop_hit = lo <= stop
             if target_hit and stop_hit:
-                # Ambiguous within one bar — assume the closer level hit first
-                # (conservative: if entry is closer to stop, stop wins)
-                dist_to_target = abs(target - entry)
-                dist_to_stop = abs(entry - stop)
-                if dist_to_stop <= dist_to_target:
+                # Same-bar ambiguity: use OPEN to decide which was hit first.
+                # If the bar OPENED already past the target, target was clearly
+                # taken first; opened past the stop → stop first; otherwise
+                # whichever was closer to the open.
+                if op >= target:
+                    return ("TARGET_HIT", target)
+                if op <= stop:
                     return ("STOP_HIT", stop)
-                return ("TARGET_HIT", target)
+                if abs(op - target) < abs(op - stop):
+                    return ("TARGET_HIT", target)
+                return ("STOP_HIT", stop)
             if target_hit:
                 return ("TARGET_HIT", target)
             if stop_hit:
@@ -253,19 +283,21 @@ def _resolve_target_vs_stop(df, entry: float, target: float, stop: float,
             target_hit = lo <= target  # PUT target is below entry
             stop_hit = hi >= stop      # PUT stop is above entry
             if target_hit and stop_hit:
-                dist_to_target = abs(entry - target)
-                dist_to_stop = abs(stop - entry)
-                if dist_to_stop <= dist_to_target:
+                if op <= target:
+                    return ("TARGET_HIT", target)
+                if op >= stop:
                     return ("STOP_HIT", stop)
-                return ("TARGET_HIT", target)
+                if abs(op - target) < abs(op - stop):
+                    return ("TARGET_HIT", target)
+                return ("STOP_HIT", stop)
             if target_hit:
                 return ("TARGET_HIT", target)
             if stop_hit:
                 return ("STOP_HIT", stop)
         # HOLD: not a directional trade — no target/stop tracking
-    # No level hit — categorize by net direction
+    # No level hit — categorize by net direction (horizon-aware noise floor)
     pct = (last_close - entry) / entry if entry else 0
-    if abs(pct) < AGENT_GRADE_NOISE_PCT:
+    if abs(pct) < _noise_threshold(horizon):
         return ("TIMEOUT_FLAT", last_close)
     return (("TIMEOUT_UP" if pct > 0 else "TIMEOUT_DOWN"), last_close)
 
@@ -320,12 +352,15 @@ def _resolve_one(c: sqlite3.Cursor, row, now_iso: str) -> bool:
     # Determine actual directional outcome for agent grading.
     # We use the highest/lowest excursion inside the window (not the close)
     # because options pay off the BEST move during the trade, not just the
-    # net drift from open to close.
+    # net drift from open to close. Noise floor is HORIZON-AWARE — for a
+    # 14-day position window 0.5% is below noise so HOLD votes were
+    # systematically graded WRONG before this fix.
+    noise = _noise_threshold(horizon)
     pct_high = (high - entry) / entry if entry else 0
     pct_low = (low - entry) / entry if entry else 0
-    if pct_high >= AGENT_GRADE_NOISE_PCT and pct_high > abs(pct_low):
+    if pct_high >= noise and pct_high > abs(pct_low):
         actual_dir = "up"
-    elif pct_low <= -AGENT_GRADE_NOISE_PCT and abs(pct_low) > pct_high:
+    elif pct_low <= -noise and abs(pct_low) > pct_high:
         actual_dir = "down"
     else:
         actual_dir = "flat"
@@ -338,7 +373,7 @@ def _resolve_one(c: sqlite3.Cursor, row, now_iso: str) -> bool:
         outcome_price = last_close
     else:
         outcome_kind, outcome_price = _resolve_target_vs_stop(
-            df, entry, target, stop, signal
+            df, entry, target, stop, signal, horizon
         )
         if outcome_kind == "TARGET_HIT":
             correct = 1

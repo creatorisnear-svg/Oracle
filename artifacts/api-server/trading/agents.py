@@ -1,8 +1,12 @@
 """
 9 Trading Prediction Agents + Judge  (v4 — Full Indicator Suite)
 Signals: BUY_CALL | BUY_PUT | HOLD
-New agents: Fear & Greed Agent (VIX/Put-Call/momentum) + Political/Trump Agent (Google News RSS)
-Judge fires at 6/9 consensus (67% agreement required)
+Agents: Price Action, Technical, Volume, Sentiment, Options Flow, Momentum,
+        Risk, Fear & Greed, Political.
+Judge fires at the horizon's THRESHOLD (5/9 default; intraday/day stricter via
+pillar floor — see HORIZONS dict). 5/9 = 56% agreement; the conviction-
+dominance, evidence-pillar, ADX-chop, weekly/SPY/HTF tilt, earnings veto and
+overextension gates do the additional filtering.
 """
 import os
 import math
@@ -1419,6 +1423,16 @@ def compute_target_hit_probability(
     wr = float(ind.get("williams_r") or -50)
     _add("Williams %R", 0.5, -50 < wr < -20, -80 < wr < -50, f"{wr:.0f}")
 
+    # Candlestick reversal patterns (engulfing, hammer, morning star, etc.)
+    # Recency-weighted score in roughly [-3, +3]; we treat |score|>=0.5 as a
+    # meaningful directional bias. Weight 1.2 — patterns are well-documented
+    # short-horizon edges, especially around inflection points.
+    cs_score = float(ind.get("cs_pattern_score") or 0.0)
+    cs_last = str(ind.get("cs_pattern_last") or "none")
+    _add("Candlestick Patterns", 1.2,
+         cs_score >= 0.5, cs_score <= -0.5,
+         f"{cs_last} (score {cs_score:+.2f})")
+
     alignment = (total_signed / total_weight) if total_weight > 0 else 0.0
     alignment = max(-1.0, min(1.0, alignment))
 
@@ -1456,7 +1470,7 @@ def compute_target_hit_probability(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JUDGE AGENT  (fires at 6/9 consensus = 67%)
+# JUDGE AGENT  (fires at horizon's THRESHOLD — default 5/9 = 56%)
 # ─────────────────────────────────────────────────────────────────────────────
 class JudgeAgent:
     name = "Judge Agent"

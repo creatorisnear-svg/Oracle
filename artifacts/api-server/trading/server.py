@@ -1091,7 +1091,8 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
         n = len(closes)
 
         from indicators import (compute_rsi, compute_macd, compute_bollinger,
-                                compute_vwap, compute_supertrend)
+                                compute_vwap, compute_supertrend,
+                                detect_candlestick_patterns)
 
         ema9 = pd.Series(closes).ewm(span=9, adjust=False).mean().values
         ema21 = pd.Series(closes).ewm(span=21, adjust=False).mean().values
@@ -1141,11 +1142,31 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
             st_out.append({"time": ts, "value": safe(st_vals[i]),
                             "direction": "up" if st_dir[i] > 0 else "down"})
 
+        # Candlestick patterns — engulfing, hammer, morning star etc. We
+        # surface them on the chart as small markers so the user can see WHICH
+        # bar triggered each pattern and WHY the system might be leaning a
+        # certain way. Tied to the same time index as the candles.
+        patterns_out: list[dict] = []
+        try:
+            cs = detect_candlestick_patterns(opens, highs, lows, closes)
+            for ev in cs.get("recent", []):
+                idx = int(ev.get("i", -1))
+                if 0 <= idx < n:
+                    patterns_out.append({
+                        "time": timestamps[idx],
+                        "name": ev.get("name", ""),
+                        "dir":  ev.get("dir", "neutral"),
+                        "price": safe(closes[idx]),
+                    })
+        except Exception as _e:
+            logger.debug(f"chart patterns failed for {sym}: {_e}")
+
         return {
             "symbol": sym, "period": period, "interval": interval,
             "candles": candles, "ema": emas, "bb": bbands,
             "rsi": rsi_out, "macd": macd_out, "volume": vol_out,
             "vwap": vwap_out, "supertrend": st_out,
+            "patterns": patterns_out,
         }
     except Exception as e:
         logger.error(f"Chart error {sym}: {e}")

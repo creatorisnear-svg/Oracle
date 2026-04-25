@@ -1,4 +1,42 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.5
+# TradeSignal AI — 9-Agent Trading Prediction System v6.6
+
+## v6.6 — Candlestick patterns + horizon-aware grading
+Three targeted improvements to accuracy + bug fixes:
+
+1. **NEW indicator: Candlestick reversal patterns** — `detect_candlestick_patterns()`
+   in indicators.py scans for 14 well-documented edges: Bullish/Bearish
+   Engulfing, Hammer, Inverted Hammer, Hanging Man, Shooting Star, Morning
+   Star, Evening Star, Three White Soldiers, Three Black Crows, Bullish/
+   Bearish Harami, Piercing Line, Dark Cloud Cover, Tweezer Top/Bottom,
+   Doji / Long-legged Doji. Each detection is recency-weighted (0.85^bars_ago).
+   Wired into:
+   - `compute_target_hit_probability` as a new "Candlestick Patterns"
+     alignment indicator (weight 1.2 — slightly above EMA/MACD/RSI because
+     patterns are well-documented short-horizon reversal edges).
+   - `/api/chart` endpoint as a `patterns[]` array → frontend renders
+     color-coded markers on each pattern bar (green up-arrow = bullish
+     reversal, red down-arrow = bearish, slate dot = indecision).
+   - New `PATTERNS` toggle button on the chart so users can hide/show.
+
+2. **Bug fix: horizon-aware grading-noise threshold.** Old
+   `AGENT_GRADE_NOISE_PCT = 0.005` (0.5%) was applied to ALL horizons —
+   but for the position 14-day window almost every stock has a >0.5%
+   excursion, which made HOLD votes systematically grade WRONG and unfairly
+   down-weighted any agent that voted HOLD on long horizons. New
+   `AGENT_GRADE_NOISE_BY_HORIZON`: intraday 0.3%, day 0.5%, swing 1.5%,
+   position 3.0%. Scales with the noise floor of each horizon.
+
+3. **Bug fix: same-bar target/stop ambiguity.** Old `_resolve_target_vs_stop`
+   used "closer level wins" (conservative bias toward STOP). New rule uses
+   the bar's OPEN price to break the tie — if the bar opened past the
+   target, target was clearly hit first; if opened past the stop, stop
+   first. Otherwise whichever level was closer to the open. Removes the
+   anti-CALL grading bias on gap-and-go bars.
+
+4. **Doc fix.** Removed misleading "Judge fires at 6/9 consensus" comment
+   (THRESHOLD = 5, and is overridden per-horizon).
+
+
 
 ## Signal stickiness (v6.5) — the system commits to its trade plan
 Without this, agents would disagree slightly between Analyze clicks and a CALL

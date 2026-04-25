@@ -666,6 +666,211 @@ def kalman_smoothed_trend(closes, process_var=1e-4, meas_var=1e-2):
     return {"smoothed": float(last), "slope_pct": float(slope_pct)}
 
 
+# ─── NEW: Candlestick reversal-pattern detection ──────────────────────────────
+def detect_candlestick_patterns(opens, highs, lows, closes, lookback=30):
+    """
+    Scans the last `lookback` bars for the highest-edge candlestick patterns:
+
+      Bullish reversal:   Bullish Engulfing, Hammer, Inverted Hammer,
+                          Morning Star, Three White Soldiers, Bullish Harami,
+                          Piercing Line, Tweezer Bottom
+      Bearish reversal:   Bearish Engulfing, Shooting Star, Hanging Man,
+                          Evening Star, Three Black Crows, Bearish Harami,
+                          Dark Cloud Cover, Tweezer Top
+      Neutral/indecision: Doji, Long-legged Doji, Spinning Top
+
+    Returns:
+      {
+        "last":   <name of pattern at the most-recent bar, or "none">,
+        "last_dir": "bull" | "bear" | "neutral" | "none",
+        "score":  signed sum of recent patterns weighted by recency
+                  (positive = bullish edge, negative = bearish edge),
+        "recent": [{"i": int, "name": str, "dir": "bull"|"bear"|"neutral"}],
+      }
+    """
+    n = len(closes)
+    if n < 5:
+        return {"last": "none", "last_dir": "none", "score": 0.0, "recent": []}
+
+    o = np.asarray(opens, dtype=float)
+    h = np.asarray(highs, dtype=float)
+    l = np.asarray(lows, dtype=float)
+    c = np.asarray(closes, dtype=float)
+
+    body = np.abs(c - o)
+    rng = np.maximum(h - l, 1e-9)
+    bp = body / rng
+    upper_wick = (h - np.maximum(c, o)) / rng
+    lower_wick = (np.minimum(c, o) - l) / rng
+    bull = c > o
+    bear = c < o
+
+    # Average true body for the lookback window — helps decide what counts
+    # as a "small" or "large" body relative to recent action.
+    win_start = max(0, n - lookback)
+    avg_body = float(np.mean(body[win_start:])) or 1e-9
+
+    detected: list[dict] = []
+
+    def add(i: int, name: str, direction: str):
+        detected.append({"i": int(i), "name": name, "dir": direction})
+
+    start = max(2, win_start)
+    for i in range(start, n):
+        b_i = body[i]
+        b_p = body[i-1]
+        is_doji = b_i < 0.1 * rng[i] and rng[i] > avg_body * 0.4
+        long_body = b_i > 1.3 * avg_body
+        small_body = b_i < 0.5 * avg_body
+
+        # Doji family (indecision — neutral but worth marking)
+        if is_doji:
+            if upper_wick[i] > 0.4 and lower_wick[i] > 0.4:
+                add(i, "Long-legged Doji", "neutral")
+            else:
+                add(i, "Doji", "neutral")
+
+        # ── Bullish single-bar reversals ────────────────────────────
+        # Hammer: small body at top, long lower wick (≥2× body), tiny upper wick.
+        if (lower_wick[i] >= 0.55 and upper_wick[i] <= 0.15
+                and b_i <= 0.35 * rng[i]):
+            # Context: a hammer is only a reversal AFTER a downtrend
+            prior_down = i >= 5 and c[i-1] < c[i-5]
+            add(i, "Hammer" if prior_down else "Hammer-shape", "bull")
+
+        # Inverted hammer: small body at bottom, long upper wick after downtrend
+        if (upper_wick[i] >= 0.55 and lower_wick[i] <= 0.15
+                and b_i <= 0.35 * rng[i]):
+            prior_down = i >= 5 and c[i-1] < c[i-5]
+            if prior_down and bull[i]:
+                add(i, "Inverted Hammer", "bull")
+
+        # Bullish Engulfing: red yesterday, green today, today's body engulfs
+        if bear[i-1] and bull[i] and c[i] > o[i-1] and o[i] < c[i-1] and b_i > b_p:
+            add(i, "Bullish Engulfing", "bull")
+
+        # Piercing Line: red yesterday, green today opening below prev low
+        # then closing above midpoint of yesterday's body
+        if (bear[i-1] and bull[i]
+                and o[i] < l[i-1]
+                and c[i] > (o[i-1] + c[i-1]) / 2
+                and c[i] < o[i-1]):
+            add(i, "Piercing Line", "bull")
+
+        # Bullish Harami: big red bar then small green bar inside it
+        if (bear[i-1] and bull[i] and long_body and small_body
+                and o[i] > c[i-1] and c[i] < o[i-1]):
+            add(i, "Bullish Harami", "bull")
+
+        # Tweezer Bottom: matching lows on consecutive bars (prior bear, this bull)
+        if (bear[i-1] and bull[i]
+                and abs(l[i] - l[i-1]) / max(c[i], 1e-9) < 0.002
+                and lower_wick[i] > 0.3):
+            add(i, "Tweezer Bottom", "bull")
+
+        # ── Bearish single-bar reversals ────────────────────────────
+        # Shooting Star: small body at bottom, long upper wick after uptrend
+        if (upper_wick[i] >= 0.55 and lower_wick[i] <= 0.15
+                and b_i <= 0.35 * rng[i]):
+            prior_up = i >= 5 and c[i-1] > c[i-5]
+            if prior_up:
+                add(i, "Shooting Star", "bear")
+
+        # Hanging Man: hammer-shape after an uptrend = bearish (distribution)
+        if (lower_wick[i] >= 0.55 and upper_wick[i] <= 0.15
+                and b_i <= 0.35 * rng[i]):
+            prior_up = i >= 5 and c[i-1] > c[i-5]
+            if prior_up and bear[i]:
+                add(i, "Hanging Man", "bear")
+
+        # Bearish Engulfing
+        if bull[i-1] and bear[i] and o[i] > c[i-1] and c[i] < o[i-1] and b_i > b_p:
+            add(i, "Bearish Engulfing", "bear")
+
+        # Dark Cloud Cover
+        if (bull[i-1] and bear[i]
+                and o[i] > h[i-1]
+                and c[i] < (o[i-1] + c[i-1]) / 2
+                and c[i] > o[i-1]):
+            add(i, "Dark Cloud Cover", "bear")
+
+        # Bearish Harami
+        if (bull[i-1] and bear[i] and long_body and small_body
+                and o[i] < c[i-1] and c[i] > o[i-1]):
+            add(i, "Bearish Harami", "bear")
+
+        # Tweezer Top
+        if (bull[i-1] and bear[i]
+                and abs(h[i] - h[i-1]) / max(c[i], 1e-9) < 0.002
+                and upper_wick[i] > 0.3):
+            add(i, "Tweezer Top", "bear")
+
+        # ── 3-bar reversal patterns ─────────────────────────────────
+        if i >= 2:
+            # Morning Star: big red, small body (gap down), big green closing
+            # back above midpoint of bar i-2.
+            if (bear[i-2] and body[i-2] > avg_body
+                    and small_body and bull[i] and body[i] > avg_body
+                    and c[i] > (o[i-2] + c[i-2]) / 2):
+                add(i, "Morning Star", "bull")
+
+            # Evening Star: mirror — top reversal
+            if (bull[i-2] and body[i-2] > avg_body
+                    and small_body and bear[i] and body[i] > avg_body
+                    and c[i] < (o[i-2] + c[i-2]) / 2):
+                add(i, "Evening Star", "bear")
+
+            # Three White Soldiers: 3 consecutive long bullish bars,
+            # each closing higher with small upper wicks.
+            if (bull[i] and bull[i-1] and bull[i-2]
+                    and c[i] > c[i-1] > c[i-2]
+                    and body[i] > avg_body * 0.9
+                    and body[i-1] > avg_body * 0.9
+                    and body[i-2] > avg_body * 0.9
+                    and upper_wick[i] < 0.25 and upper_wick[i-1] < 0.25):
+                add(i, "Three White Soldiers", "bull")
+
+            # Three Black Crows: mirror
+            if (bear[i] and bear[i-1] and bear[i-2]
+                    and c[i] < c[i-1] < c[i-2]
+                    and body[i] > avg_body * 0.9
+                    and body[i-1] > avg_body * 0.9
+                    and body[i-2] > avg_body * 0.9
+                    and lower_wick[i] < 0.25 and lower_wick[i-1] < 0.25):
+                add(i, "Three Black Crows", "bear")
+
+    # Recency-weighted score: bars closer to "now" matter more than old ones.
+    # decay = 0.85 ** bars_ago. Bull = +1, Bear = -1, Neutral = 0.
+    score = 0.0
+    for ev in detected:
+        bars_ago = (n - 1) - ev["i"]
+        decay = 0.85 ** bars_ago
+        if ev["dir"] == "bull":
+            score += decay
+        elif ev["dir"] == "bear":
+            score -= decay
+
+    # Latest pattern at the most-recent bar (if any)
+    last_name = "none"
+    last_dir = "none"
+    last_idx = n - 1
+    for ev in reversed(detected):
+        if ev["i"] == last_idx:
+            last_name = ev["name"]
+            last_dir = ev["dir"]
+            break
+
+    # Cap recent list to the most-recent 12 events for UI/chart use
+    recent = detected[-12:]
+
+    return {
+        "last": last_name,
+        "last_dir": last_dir,
+        "score": round(float(score), 3),
+        "recent": recent,
+    }
+
+
 # ─── NEW: Monte Carlo target-hit probability (simple GBM) ─────────────────────
 def monte_carlo_target_prob(price, target, vol_pct, days=7, n_sims=2000):
     """Probability of price touching `target` within `days` trading days using GBM."""
@@ -688,6 +893,7 @@ def monte_carlo_target_prob(price, target, vol_pct, days=7, n_sims=2000):
 # ─── Composite Indicator Bundle ────────────────────────────────────────────────
 def compute_all_indicators(df: pd.DataFrame) -> dict:
     closes = df["Close"].values.astype(float)
+    opens = df["Open"].values.astype(float)
     highs = df["High"].values.astype(float)
     lows = df["Low"].values.astype(float)
     volumes = df["Volume"].fillna(0).values.astype(float)
@@ -728,6 +934,10 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
     triangle_pat = detect_triangle(highs, lows)
     cup_handle_pat = detect_cup_handle(closes, highs)
     kalman = kalman_smoothed_trend(closes)
+    # Candlestick reversal patterns (engulfing, hammer, morning star, etc.)
+    # Used by JudgeAgent's target-hit alignment AND surfaced on the chart so
+    # the user can see which bars triggered each pattern.
+    cs_patterns = detect_candlestick_patterns(opens, highs, lows, closes)
 
     # Volume stats
     avg_vol_20 = np.mean(volumes[-20:]) if n >= 20 else np.mean(volumes) if n > 0 else 1
@@ -861,6 +1071,11 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "triangle_pattern": triangle_pat,
         "cup_handle": cup_handle_pat,
         "kalman_trend": kalman,
+        # Candlestick patterns (used as a new alignment indicator + chart marks)
+        "candlestick_patterns": cs_patterns,
+        "cs_pattern_score": cs_patterns.get("score", 0.0),
+        "cs_pattern_last": cs_patterns.get("last", "none"),
+        "cs_pattern_dir": cs_patterns.get("last_dir", "none"),
     }
 
 

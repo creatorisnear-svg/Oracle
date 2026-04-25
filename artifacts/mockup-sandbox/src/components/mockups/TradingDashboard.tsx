@@ -373,7 +373,7 @@ export default function TradingDashboard() {
   const searchAbortRef = useRef<AbortController | null>(null);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchBoxRef = useRef<HTMLDivElement>(null);
-  const [indicators_visible, setIndicatorsVisible] = useState({ ema: true, bb: false, vwap: true, st: false, vol: true });
+  const [indicators_visible, setIndicatorsVisible] = useState({ ema: true, bb: false, vwap: true, st: false, vol: true, patterns: true });
   const [chain, setChain] = useState<OptionsChain | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
   const [chainExpiry, setChainExpiry] = useState("");
@@ -408,6 +408,10 @@ export default function TradingDashboard() {
   const spikeAlertedTimeRef = useRef<number>(0);
   const spikeMarkersRef = useRef<any>(null);
   const spikeMarkerListRef = useRef<any[]>([]);
+  // Candlestick-pattern markers (engulfing / hammer / morning star etc.) —
+  // separate primitive so the toggle can mount/unmount without touching the
+  // history-of-predictions markers.
+  const patternMarkersRef = useRef<any>(null);
   const [spikeAlert, setSpikeAlert] = useState<{ ratio: number; ts: number } | null>(null);
   const spikeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -438,6 +442,7 @@ export default function TradingDashboard() {
     spikeAlertedTimeRef.current = 0;
     spikeMarkersRef.current = null;
     spikeMarkerListRef.current = [];
+    patternMarkersRef.current = null;
   }, []);
 
   const loadChart = useCallback(async (sym: string, p: string) => {
@@ -624,6 +629,38 @@ export default function TradingDashboard() {
           .map((d: any) => ({ time: d.time as UTCTimestamp, value: d.value }));
         if (upData.length) stUp.setData(upData);
         if (dnData.length) stDn.setData(dnData);
+      }
+
+      // ── Candlestick reversal patterns (engulfing, hammer, morning star…)
+      // Each detected pattern gets a small color-coded marker on its bar so
+      // the user can see WHY the system might be leaning a certain way.
+      // Green = bullish reversal, red = bearish reversal, slate = neutral
+      // (doji / spinning top — indecision worth flagging).
+      if (indicators_visible.patterns && Array.isArray(data.patterns) && data.patterns.length && candleRef.current) {
+        try {
+          const pmarkers: any[] = [];
+          // Cap to most recent 15 to keep the chart readable
+          const tail = data.patterns.slice(-15);
+          for (const p of tail) {
+            if (p?.time == null || !p?.name) continue;
+            const isBull = p.dir === "bull";
+            const isBear = p.dir === "bear";
+            pmarkers.push({
+              time: p.time as UTCTimestamp,
+              position: isBull ? "belowBar" : isBear ? "aboveBar" : "inBar",
+              color: isBull ? "#10b981" : isBear ? "#ef4444" : "#94a3b8",
+              shape: isBull ? "arrowUp" : isBear ? "arrowDown" : "circle",
+              text: p.name,
+              size: 0.8,
+            });
+          }
+          pmarkers.sort((a, b) => (a.time as number) - (b.time as number));
+          if (pmarkers.length) {
+            patternMarkersRef.current = createSeriesMarkers(candle, pmarkers);
+          }
+        } catch (e) {
+          console.warn("pattern markers failed", e);
+        }
       }
 
       // Volume buy/sell histogram — green = buying pressure, red = selling pressure
@@ -1366,10 +1403,11 @@ export default function TradingDashboard() {
               );
             })}
             <div className="w-px h-4 bg-slate-700 mx-1" />
-            {(["ema","bb","vwap","st","vol"] as const).map(ind => (
+            {(["ema","bb","vwap","st","vol","patterns"] as const).map(ind => (
               <button key={ind} onClick={() => setIndicatorsVisible(v => ({ ...v, [ind]: !v[ind] }))}
+                title={ind === "patterns" ? "Show candlestick patterns (engulfing, hammer, morning star…)" : ""}
                 className={`text-xs px-2.5 py-1 rounded font-semibold ${indicators_visible[ind] ? "bg-slate-600 text-white" : "text-slate-600 hover:text-slate-400"}`}
-              >{ind.toUpperCase()}</button>
+              >{ind === "patterns" ? "PATTERNS" : ind.toUpperCase()}</button>
             ))}
           </div>
 
