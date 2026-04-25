@@ -48,6 +48,73 @@ def reload_track_record() -> dict:
 reload_track_record()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HORIZON CONFIG — lets the user pick the prediction length.
+# Each horizon controls:
+#   • period/interval  – what data we fetch from yfinance
+#   • forecast_bars    – how many bars the projected line covers
+#   • bar_minutes      – the wall-clock duration of each bar
+#   • target_hit_bars  – lookahead window for target-hit probability math
+#   • stop_mult/tgt    – ATR multipliers for stop & target (tight for intraday)
+#   • threshold        – minimum agent consensus to fire (intraday is stricter)
+#   • min_pillar_score – evidence-pillar floor (out of 4) to fire
+# Designed specifically for short-term options (calls/puts) trading.
+# ─────────────────────────────────────────────────────────────────────────────
+HORIZONS: dict[str, dict] = {
+    "intraday": {  # quick scalp, hold ~1-2 hours
+        "label": "Intraday (1–2h)",
+        "period": "5d", "interval": "5m",
+        "forecast_bars": 24,        # 24 × 5m ≈ 2 hours of projection
+        "bar_minutes": 5,
+        "target_hit_bars": 24,      # 2 hours
+        "stop_mult": 0.7, "tgt_mult": 0.9,
+        "threshold": 6,             # need 6/9 (stricter — 5m bars are noisy)
+        "min_pillar_score": 1.5,
+        "expiry_pref": "0DTE / weekly",
+    },
+    "day": {  # 0DTE, hold rest of session
+        "label": "Today (0DTE)",
+        "period": "5d", "interval": "15m",
+        "forecast_bars": 16,        # 16 × 15m ≈ 4 hours
+        "bar_minutes": 15,
+        "target_hit_bars": 16,      # rest of day
+        "stop_mult": 0.8, "tgt_mult": 1.1,
+        "threshold": 6,
+        "min_pillar_score": 1.5,
+        "expiry_pref": "0DTE / weekly",
+    },
+    "swing": {  # multi-day swing, hold 1-5 days
+        "label": "Swing (1–5d)",
+        "period": "1mo", "interval": "1h",
+        "forecast_bars": 30,        # ~5 trading days of hourly bars
+        "bar_minutes": 60,
+        "target_hit_bars": 30,
+        "stop_mult": 1.0, "tgt_mult": 1.4,
+        "threshold": 5,
+        "min_pillar_score": 1.0,
+        "expiry_pref": "weekly / 2-week",
+    },
+    "position": {  # 1-3 weeks, current default
+        "label": "Position (1–3w)",
+        "period": "3mo", "interval": "1d",
+        "forecast_bars": 7,
+        "bar_minutes": 24 * 60,
+        "target_hit_bars": 7,
+        "stop_mult": 1.1, "tgt_mult": 1.3,
+        "threshold": 5,
+        "min_pillar_score": 1.0,
+        "expiry_pref": "2-week / monthly",
+    },
+}
+DEFAULT_HORIZON = "swing"
+
+
+def get_horizon_config(name: str | None) -> dict:
+    """Return the horizon config dict, falling back to swing if unknown."""
+    key = (name or DEFAULT_HORIZON).lower().strip()
+    return HORIZONS.get(key, HORIZONS[DEFAULT_HORIZON]) | {"key": key if key in HORIZONS else DEFAULT_HORIZON}
+
+
 def get_track_record(symbol: str) -> dict | None:
     """Return the model's historical hit-rate on this stock, or None if not tracked."""
     if not symbol or not _TRACK_RECORD:
@@ -961,6 +1028,8 @@ def compute_target_hit_probability(
     atr: float,
     ind: dict,
     days: int = 7,
+    bars: int | None = None,
+    bar_minutes: int = 24 * 60,
     hist_hit_rate: float | None = None,
 ) -> dict:
     """
@@ -997,12 +1066,15 @@ def compute_target_hit_probability(
         }
 
     # ── A. Volatility-based first-passage probability ───────────────
-    # 1 ATR ≈ 1 day's expected price range, so σ_daily ≈ atr / price.
-    # Probability of touching a barrier D away within N days under
+    # 1 ATR ≈ 1 bar's expected price range, so σ_per_bar ≈ atr / price.
+    # Probability of touching a barrier D away within N bars under
     # zero-drift Brownian motion: 2·(1 − Φ(D / (σ·√N))).
-    sigma_daily = atr / price
+    # When `bars` is given (intraday/swing) we use bar-based math so the
+    # window is correct for ANY interval (5m, 15m, 1h, 1d).
+    n_bars = int(bars) if bars and bars > 0 else int(days)
+    sigma_per_bar = atr / price
     distance_pct = abs(target - price) / price
-    z = distance_pct / (sigma_daily * math.sqrt(max(days, 1)))
+    z = distance_pct / (sigma_per_bar * math.sqrt(max(n_bars, 1)))
     p_base = 2.0 * (1.0 - norm.cdf(z))
     p_base = max(0.05, min(0.95, p_base))
 
@@ -1140,6 +1212,8 @@ def compute_target_hit_probability(
         "breakdown": breakdown,
         "method": method,
         "days": days,
+        "bars": n_bars,
+        "bar_minutes": bar_minutes,
     }
 
 
@@ -1149,11 +1223,24 @@ def compute_target_hit_probability(
 class JudgeAgent:
     name = "Judge Agent"
     emoji = "⚖️"
-    THRESHOLD = 5  # out of 9 analysts
+    THRESHOLD = 5  # out of 9 analysts (default — overridden by horizon config)
 
     def decide(self, votes: list, ind: dict) -> dict:
         price = ind.get("price", 0)
         atr = ind.get("atr14", price * 0.02) if price else 1
+
+        # ── Horizon-aware tuning ────────────────────────────────────
+        # Server stuffs the horizon key into ind["_horizon"] when handling the
+        # request. We pull threshold, ATR multipliers, forecast bars and the
+        # target-hit window from the horizon config.
+        horizon = get_horizon_config(ind.get("_horizon"))
+        threshold = int(horizon.get("threshold", self.THRESHOLD))
+        h_stop_mult = float(horizon.get("stop_mult", 1.1))
+        h_tgt_mult = float(horizon.get("tgt_mult", 1.3))
+        forecast_bars = int(horizon.get("forecast_bars", 7))
+        bar_minutes = int(horizon.get("bar_minutes", 24 * 60))
+        target_hit_bars = int(horizon.get("target_hit_bars", forecast_bars))
+        min_pillar_score = float(horizon.get("min_pillar_score", 1.0))
 
         call_count = sum(1 for v in votes if v["vote"] == "BUY_CALL")
         put_count = sum(1 for v in votes if v["vote"] == "BUY_PUT")
@@ -1172,6 +1259,8 @@ class JudgeAgent:
 
         # Risk/reward sized to volatility regime: tight ATR (low-vol stocks like SPY)
         # need wider stops + closer targets so they don't whipsaw.
+        # Horizon multipliers compose ON TOP of the regime — short horizons
+        # automatically get tighter stops/targets that fit the bar duration.
         atr_pct_now = (atr / price * 100) if price else 2.0
         if atr_pct_now < 1.5:           # low vol (e.g. SPY, large indexes)
             stop_mult, tgt_mult = 1.4, 1.0
@@ -1179,8 +1268,11 @@ class JudgeAgent:
             stop_mult, tgt_mult = 0.9, 1.6
         else:                            # normal
             stop_mult, tgt_mult = 1.1, 1.3
+        # Blend horizon defaults (60%) with regime tweaks (40%) so both matter
+        stop_mult = round(0.6 * h_stop_mult + 0.4 * stop_mult, 3)
+        tgt_mult = round(0.6 * h_tgt_mult + 0.4 * tgt_mult, 3)
 
-        if call_count >= self.THRESHOLD:
+        if call_count >= threshold:
             signal = "BUY_CALL"
             agreed = [v["agent"] for v in votes if v["vote"] == "BUY_CALL"]
             disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_CALL"]
@@ -1188,7 +1280,7 @@ class JudgeAgent:
             entry = price
             stop = round(price - stop_mult * atr, 2)
             target = round(price + tgt_mult * atr, 2)
-        elif put_count >= self.THRESHOLD:
+        elif put_count >= threshold:
             signal = "BUY_PUT"
             agreed = [v["agent"] for v in votes if v["vote"] == "BUY_PUT"]
             disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_PUT"]
@@ -1341,12 +1433,15 @@ class JudgeAgent:
                 "score": round(total_pillar_score, 2),
             }
 
-            # Veto only when the underlying tape is BARELY supportive
-            # (total score below 1.0 out of 4 = essentially nothing backing it).
-            if total_pillar_score < 1.0:
+            # Veto when underlying tape is too weak. Threshold scales with
+            # horizon — short-term (intraday/0DTE) demands more evidence
+            # because there's less time for trades to recover from noise.
+            if total_pillar_score < min_pillar_score:
                 evidence_reason = (
                     f"pillar score {total_pillar_score:.1f}/4.0 "
-                    f"({', '.join(agreed_pillars) or 'none confirm'}) — too weak"
+                    f"(< {min_pillar_score:.1f} required for "
+                    f"{horizon.get('label', 'this horizon')}) "
+                    f"— {', '.join(agreed_pillars) or 'none confirm'}"
                 )
                 signal = "HOLD"
                 target = price
@@ -1467,21 +1562,47 @@ class JudgeAgent:
         # 1. Anchor first point at NOW + current price so the line visually connects to the live chart
         # 2. Project toward the target with magnitude scaled by confidence:
         #    high conviction → the line reaches the target; low conviction → it falls short
-        # 3. Use real trading days (Mon–Fri) for the next 7 sessions
-        from datetime import datetime, timedelta, timezone
+        # 3. Use real trading sessions sized by the chosen horizon's bar interval:
+        #    intraday  → 5-min bars during market hours
+        #    0DTE/day  → 15-min bars during market hours
+        #    swing     → 1-hour bars during market hours
+        #    position  → daily bars (Mon–Fri)
+        from datetime import datetime, timedelta, timezone, time as dtime
         forecast = []
         now_ts = int(time.time())
         if signal != "HOLD":
             # Anchor: forecast starts AT current price/now so it joins the chart's last candle
             forecast.append({"time": now_ts, "value": round(price, 2)})
 
-            # Generate next 7 trading-day timestamps after now
+            forecast_ts: list[int] = []
             dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
-            trading_days: list[int] = []
-            while len(trading_days) < 7:
-                dt += timedelta(days=1)
-                if dt.weekday() < 5:  # Mon–Fri only
-                    trading_days.append(int(dt.timestamp()))
+
+            if bar_minutes >= 24 * 60:
+                # Daily bars: skip weekends
+                while len(forecast_ts) < forecast_bars:
+                    dt += timedelta(days=1)
+                    if dt.weekday() < 5:
+                        forecast_ts.append(int(dt.timestamp()))
+            else:
+                # Intraday bars (5m, 15m, 1h): hop forward `bar_minutes` and
+                # only emit timestamps that fall in the US cash session
+                # (13:30–20:00 UTC ≈ 9:30–16:00 ET). Cross weekend if needed.
+                step = timedelta(minutes=bar_minutes)
+                guard = 0
+                while len(forecast_ts) < forecast_bars and guard < forecast_bars * 80:
+                    dt = dt + step
+                    guard += 1
+                    if dt.weekday() >= 5:
+                        # Skip to Monday 13:30 UTC
+                        days_to_mon = 7 - dt.weekday()
+                        dt = (dt + timedelta(days=days_to_mon)).replace(hour=13, minute=30, second=0, microsecond=0)
+                        continue
+                    t = dt.time()
+                    if dtime(13, 30) <= t <= dtime(20, 0):
+                        forecast_ts.append(int(dt.timestamp()))
+                    elif t > dtime(20, 0):
+                        # After close → jump to next day open
+                        dt = (dt + timedelta(days=1)).replace(hour=13, minute=30, second=0, microsecond=0)
 
             # Confidence scales how far the projection actually reaches.
             # 50% conf → 50% of the way to target; 95% conf → 95% of the way.
@@ -1489,8 +1610,9 @@ class JudgeAgent:
             full_move = abs(target - price)
             max_move = full_move * conf_scale
 
-            for i, ts in enumerate(trading_days):
-                progress = (i + 1) / 7
+            n = max(len(forecast_ts), 1)
+            for i, ts in enumerate(forecast_ts):
+                progress = (i + 1) / n
                 ease = progress * progress * (3 - 2 * progress)  # smooth S-curve
                 delta = max_move * ease
                 if signal == "BUY_CALL":
@@ -1523,7 +1645,10 @@ class JudgeAgent:
         # + per-stock historical hit-rate calibration.
         hit = compute_target_hit_probability(
             signal=signal, price=price, target=target, atr=atr, ind=ind,
-            days=7, hist_hit_rate=track_record["hit_rate"] if track_record else None,
+            days=max(1, target_hit_bars * bar_minutes // (24 * 60)),
+            bars=target_hit_bars,
+            bar_minutes=bar_minutes,
+            hist_hit_rate=track_record["hit_rate"] if track_record else None,
         )
 
         # The headline confidence number IS the real target-hit probability now.
@@ -1566,8 +1691,16 @@ class JudgeAgent:
                 (f"🛑 VETO: {veto_reason}" if veto_reason
                  else (f"🛑 NO BACKING: {evidence_reason}" if evidence_reason
                        else ("✅ CONSENSUS" if signal != "HOLD"
-                             else f"⏳ Need {self.THRESHOLD}/{total_analysts}")))
+                             else f"⏳ Need {threshold}/{total_analysts}")))
             ),
+            "horizon": {
+                "key": horizon.get("key", DEFAULT_HORIZON),
+                "label": horizon.get("label", ""),
+                "threshold": threshold,
+                "bar_minutes": bar_minutes,
+                "forecast_bars": forecast_bars,
+                "expiry_pref": horizon.get("expiry_pref", ""),
+            },
             "evidence_reason": evidence_reason,
             "evidence_pillars": evidence_pillars or None,
             "macro_context": {

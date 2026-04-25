@@ -24,6 +24,7 @@ from agents import (
     PriceActionAgent, TechnicalAgent, VolumeAgent,
     SentimentAgent, OptionsFlowAgent, MomentumAgent,
     RiskAgent, FearGreedAgent, PoliticalAgent, JudgeAgent,
+    HORIZONS, get_horizon_config, DEFAULT_HORIZON,
 )
 from indicators import compute_all_indicators, safe_float
 from learning import LearningSystem
@@ -449,9 +450,10 @@ def _market_regime() -> dict:
     return result
 
 
-def run_agents_sync(sym: str, df: pd.DataFrame, info: dict):
+def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAULT_HORIZON):
     ind = compute_all_indicators(df)
     ind["_symbol"] = sym
+    ind["_horizon"] = horizon  # JudgeAgent reads this to scale stops/targets/threshold
     ind["_news"] = _LIVE_CACHE.get(sym, {}).get("news", [])
     # ── Higher-TF & market-context filters (accuracy boosters) ─────
     ind["weekly_trend"] = _weekly_trend(sym)
@@ -810,6 +812,27 @@ def accuracy_by_symbol(symbol: str):
         return {"error": str(e), "symbol": sym}
 
 
+@app.get("/api/horizons")
+def list_horizons():
+    """Return the available prediction horizons (for the UI dropdown)."""
+    return {
+        "default": DEFAULT_HORIZON,
+        "horizons": [
+            {
+                "key": k,
+                "label": v["label"],
+                "interval": v["interval"],
+                "period": v["period"],
+                "forecast_bars": v["forecast_bars"],
+                "bar_minutes": v["bar_minutes"],
+                "threshold": v["threshold"],
+                "expiry_pref": v.get("expiry_pref", ""),
+            }
+            for k, v in HORIZONS.items()
+        ],
+    }
+
+
 @app.get("/api/chart/{symbol}")
 def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
     sym = symbol.upper()
@@ -893,11 +916,15 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
 
 
 @app.get("/api/analyze/{symbol}")
-def analyze(symbol: str, period: str = "3mo"):
+def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
     sym = symbol.upper()
     try:
-        df, info = get_df(sym, period=period)
-        votes, ind = run_agents_sync(sym, df, info)
+        # Horizon picks the right data window unless the caller overrides period
+        h = get_horizon_config(horizon)
+        use_period = period or h["period"]
+        use_interval = h["interval"]
+        df, info = get_df(sym, period=use_period, interval=use_interval)
+        votes, ind = run_agents_sync(sym, df, info, horizon=h["key"])
         judgment = JUDGE.decide(votes, ind)
         pred_id = LEARNING.save_prediction(
             symbol=sym, signal=judgment["signal"],
@@ -1035,6 +1062,9 @@ def admin_learn_status():
 async def ws_analyze(websocket: WebSocket, symbol: str):
     await websocket.accept()
     sym = symbol.upper()
+    # Horizon comes from the connection query string: /api/ws/analyze/AAPL?horizon=swing
+    horizon_q = (websocket.query_params.get("horizon") or DEFAULT_HORIZON).lower()
+    h_cfg = get_horizon_config(horizon_q)
 
     if sym not in _WS_CLIENTS:
         _WS_CLIENTS[sym] = set()
@@ -1052,18 +1082,21 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             "type": "status", "message": f"🔍 Fetching {sym} market data..."
         }))
 
-        # 2. Candle data
+        # 2. Candle data — period/interval driven by the chosen horizon
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            df, info = await loop.run_in_executor(pool, get_df, sym, "3mo", "1d")
+            df, info = await loop.run_in_executor(
+                pool, get_df, sym, h_cfg["period"], h_cfg["interval"]
+            )
 
         await websocket.send_text(json.dumps({
             "type": "status",
-            "message": f"📊 {sym} loaded — running 9 specialist agents..."
+            "message": f"📊 {sym} loaded ({h_cfg['label']}) — running 9 specialist agents..."
         }))
 
         # 3. Build indicators once
         ind = compute_all_indicators(df)
         ind["_symbol"] = sym
+        ind["_horizon"] = h_cfg["key"]
         ind["_news"] = live.get("news", [])
         weights = LEARNING.get_weights()
 

@@ -1,7 +1,35 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v4
+# TradeSignal AI — 9-Agent Trading Prediction System v5
 
 ## Overview
 Professional trading prediction system with 9 specialized AI agents running in parallel, interactive TradingView-quality charts, live options chain viewer, buy/sell volume histogram, real options expiry dates, S-curve forecast lines, and a learning system that tracks prediction accuracy over time.
+
+## Prediction Horizons (v5 — short-term focus for calls/puts)
+The user can pick the prediction length from the UI. The chosen horizon drives the
+data interval, the forecast window, the consensus threshold, and the ATR target /
+stop multipliers fed to every agent.
+
+| Key | Label | Bars | Lookahead | Threshold | Best for |
+|-----|-------|------|-----------|-----------|----------|
+| `intraday` | Intraday (1–2h) | 5-min | 24 bars (~2h) | 6/9 | scalps, 0DTE |
+| `day` | Today (0DTE) | 15-min | 16 bars (~4h) | 6/9 | 0DTE / weekly |
+| `swing` | Swing (1–5d) **(default)** | 1-hour | 30 bars (~5d) | 5/9 | weekly / 2-week |
+| `position` | Position (1–3w) | daily | 7 bars (~7d) | 5/9 | monthly |
+
+Defined in `agents.py::HORIZONS`. Endpoints: `GET /api/horizons`, then pass
+`?horizon=swing` to `/api/analyze/{sym}` and the WebSocket
+`/api/ws/analyze/{sym}?horizon=swing`.
+
+## Back-Test Results (v5, `tests/backtest_horizons.py`)
+On `AAPL NVDA SPY` (60 days of intraday history, ~15 sample points per horizon):
+
+| Horizon | Signals | Direction | Target Hit | Avg Move |
+|---------|---------|-----------|------------|----------|
+| Swing (1–5d) | 14 | **78.6%** | **85.7%** | +1.96% |
+| Position (1–3w) | 12 | 33.3% | 33.3% | −0.89% |
+| Intraday / Day | 0 | — | — | — (gates too strict on noisy 5/15-min bars; intentional) |
+
+**Take-away**: the swing horizon is the system's strongest setup. The strict
+6-of-9 gate on intraday/0DTE is intentionally suppressing low-conviction trades.
 
 ## Architecture
 - **Backend**: Python FastAPI (`artifacts/api-server/trading/`)

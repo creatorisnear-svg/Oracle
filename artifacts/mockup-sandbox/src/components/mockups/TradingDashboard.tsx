@@ -23,8 +23,17 @@ interface TargetHitBreakdownRow {
   weight: number; contrib: number; detail: string;
   supports_target: boolean;
 }
+interface HorizonInfo {
+  key: string; label: string; threshold: number;
+  bar_minutes: number; forecast_bars: number; expiry_pref: string;
+}
+interface Horizon {
+  key: string; label: string; interval: string; period: string;
+  forecast_bars: number; bar_minutes: number; threshold: number; expiry_pref: string;
+}
 interface Judgment {
   signal: Signal; confidence: number;
+  horizon?: HorizonInfo;
   target_hit_prob?: number;
   target_hit_base_pct?: number;
   target_hit_alignment?: number;
@@ -273,6 +282,9 @@ export default function TradingDashboard() {
   const [analyzing, setAnalyzing] = useState(false);
   const [tab, setTab] = useState<"signal" | "agents" | "options" | "chain" | "news" | "fear" | "accuracy">("signal");
   const [period, setPeriod] = useState("3mo");
+  const [horizon, setHorizon] = useState<string>("swing");
+  const [horizons, setHorizons] = useState<Horizon[]>([]);
+  const horizonRef = useRef<string>("swing");
   const [indicators, setIndicators] = useState<Record<string, unknown>>({});
   const [politicalNews, setPoliticalNews] = useState<NewsItem[]>([]);
   const [fearGreed, setFearGreed] = useState<FearGreed | null>(null);
@@ -557,6 +569,18 @@ export default function TradingDashboard() {
   useEffect(() => {
     loadFearGreed();
     loadAccuracy();
+    // Fetch the supported prediction horizons once
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/horizons`);
+        if (res.ok) {
+          const d = await res.json();
+          if (Array.isArray(d.horizons) && d.horizons.length) {
+            setHorizons(d.horizons);
+          }
+        }
+      } catch {}
+    })();
     const iv = setInterval(() => { loadFearGreed(); loadAccuracy(); }, 120000);
     return () => clearInterval(iv);
   }, []);
@@ -570,7 +594,7 @@ export default function TradingDashboard() {
     setStatus("");
     setAnalyzing(true);
 
-    const ws = new WebSocket(`${WS_BASE}/api/ws/analyze/${sym}`);
+    const ws = new WebSocket(`${WS_BASE}/api/ws/analyze/${sym}?horizon=${horizonRef.current}`);
     wsRef.current = ws;
 
     ws.onmessage = (ev) => {
@@ -710,12 +734,51 @@ export default function TradingDashboard() {
         )}
       </div>
 
+      {/* ── Prediction Horizon selector (drives the agents + forecast window) ── */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-800 shrink-0 bg-[#0c1322]">
+        <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold shrink-0">
+          Prediction length:
+        </span>
+        <div className="flex flex-wrap gap-1.5">
+          {(horizons.length ? horizons : [
+            { key: "intraday", label: "Intraday (1–2h)" } as Horizon,
+            { key: "day",      label: "Today (0DTE)" }     as Horizon,
+            { key: "swing",    label: "Swing (1–5d)" }     as Horizon,
+            { key: "position", label: "Position (1–3w)" }  as Horizon,
+          ]).map(h => {
+            const active = horizon === h.key;
+            return (
+              <button
+                key={h.key}
+                onClick={() => {
+                  setHorizon(h.key);
+                  horizonRef.current = h.key;
+                  if (symRef.current) runAnalysis(symRef.current);
+                }}
+                title={h.expiry_pref ? `Best for ${h.expiry_pref} options` : undefined}
+                className={`text-xs px-3 py-1 rounded font-semibold transition-all ${
+                  active
+                    ? "bg-emerald-600 text-white shadow-sm shadow-emerald-500/30"
+                    : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
+                }`}
+              >{h.label}</button>
+            );
+          })}
+        </div>
+        {judgment?.horizon && (
+          <span className="ml-auto text-[10px] text-slate-500 italic shrink-0">
+            current: {judgment.horizon.label} · need {judgment.horizon.threshold}/9 agents
+          </span>
+        )}
+      </div>
+
       {/* ── Main Area ── */}
       <div className="flex flex-1 overflow-hidden">
         {/* ── LEFT: Chart ── */}
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-          {/* Chart controls */}
+          {/* Chart window controls */}
           <div className="flex items-center gap-2 px-3 py-1.5 border-b border-slate-800 shrink-0 bg-[#0d1524]">
+            <span className="text-[10px] uppercase tracking-wider text-slate-600 font-bold mr-1">Chart:</span>
             {(["1D","5D","1M","3M","6M"] as const).map(p => {
               const pMap: Record<string, string> = { "1D":"1d","5D":"5d","1M":"1mo","3M":"3mo","6M":"6mo" };
               return (
