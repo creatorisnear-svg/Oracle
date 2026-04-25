@@ -718,7 +718,7 @@ export default function TradingDashboard() {
 
   const WATCHLIST = ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "QQQ", "AMZN", "META", "AMD", "COIN"];
   const TAB_CLASSES = (t: string) =>
-    `px-3 py-1.5 text-xs font-semibold rounded-md transition-all cursor-pointer ${tab === t ? "bg-blue-600 text-white" : "text-slate-400 hover:text-white hover:bg-slate-700"}`;
+    `px-2 py-1.5 text-[11px] font-semibold rounded-md transition-all cursor-pointer text-center whitespace-nowrap ${tab === t ? "bg-blue-600 text-white shadow-md shadow-blue-500/20" : "text-slate-400 hover:text-white hover:bg-slate-700/70"}`;
 
   const stj = judgment ? signalStyle(judgment.signal) : signalStyle("HOLD");
   const callPct = votes.length ? Math.round(votes.filter(v => v.vote === "BUY_CALL").length / votes.length * 100) : 0;
@@ -910,7 +910,7 @@ export default function TradingDashboard() {
         </div>
 
         {/* ── RIGHT: Sidebar ── */}
-        <div className="w-72 flex flex-col border-l border-slate-700/50 bg-[#0d1524] shrink-0 overflow-hidden">
+        <div className="w-80 lg:w-96 flex flex-col border-l border-slate-700/50 bg-[#0d1524] shrink-0 overflow-hidden">
           {/* Fear & Greed mini strip — market-wide AND per-stock */}
           {(fearGreed || stockSentiment) && (
             <div className="px-3 py-2 border-b border-slate-800 shrink-0 space-y-2">
@@ -939,8 +939,8 @@ export default function TradingDashboard() {
             </div>
           )}
 
-          {/* Tabs */}
-          <div className="flex flex-wrap gap-1 p-2 border-b border-slate-800 shrink-0">
+          {/* Tabs — fixed 4×2 grid so labels never wrap unevenly */}
+          <div className="grid grid-cols-4 gap-1 p-2 border-b border-slate-800 shrink-0">
             {([
               ["signal","SIGNAL"],["agents","AGENTS"],["options","OPTIONS"],["chain","CHAIN"],
               ["news","NEWS"],["fear","F&G"],["accuracy","ACCURACY"],["paper","PAPER"]
@@ -963,7 +963,7 @@ export default function TradingDashboard() {
                   <div className="text-center py-8 space-y-2">
                     <p className="text-slate-400 text-sm">Enter a symbol and click Analyze</p>
                     <p className="text-slate-500 text-xs">9 agents will vote CALL / PUT / HOLD</p>
-                    <p className="text-slate-600 text-xs">6 of 9 must agree to fire a signal</p>
+                    <p className="text-slate-600 text-xs">5 of 9 must agree to fire a signal</p>
                   </div>
                 ) : analyzing ? (
                   <div className="text-center py-6 space-y-3">

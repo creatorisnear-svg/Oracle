@@ -908,7 +908,7 @@ def accuracy_report():
     try:
         report = LEARNING.get_accuracy_report()
         agent_methods = {a.name: getattr(a, "method", "") for a in AGENTS}
-        agent_methods[JUDGE.name] = "6/9 consensus threshold — fires CALL/PUT only on strong agreement"
+        agent_methods[JUDGE.name] = "5/9 consensus threshold — fires CALL/PUT only on majority agreement"
         return {
             "status": "ok",
             "report": report,
