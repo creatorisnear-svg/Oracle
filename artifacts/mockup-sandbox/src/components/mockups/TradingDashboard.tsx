@@ -25,6 +25,7 @@ interface Judgment {
   vote_tally: { BUY_CALL: number; BUY_PUT: number; HOLD: number };
   position_size_pct: number; judge_reason: string;
   action: string; strike_hint: string; expiry_hint: string;
+  expiry_weekly: string; expiry_biweekly: string; expiry_monthly: string;
   entry_trigger: string; risk_note: string;
   forecast_line?: { time: number; value: number }[];
   fear_greed_score?: number; fear_greed_label?: string;
@@ -242,6 +243,23 @@ export default function TradingDashboard() {
           .map((d: any) => ({ time: d.time as UTCTimestamp, value: d.value }));
         if (upData.length) stUp.setData(upData);
         if (dnData.length) stDn.setData(dnData);
+      }
+
+      // Volume buy/sell histogram — green = buying pressure, red = selling pressure
+      if (data.volume?.length) {
+        chart.priceScale('right').applyOptions({ scaleMarginTop: 0.05, scaleMarginBottom: 0.28 });
+        const volSeries = chart.addSeries(HistogramSeries, {
+          priceFormat: { type: 'volume' },
+          priceScaleId: 'vol',
+          lastValueVisible: false,
+          priceLineVisible: false,
+        } as any);
+        (chart.priceScale('vol') as any).applyOptions({ scaleMarginTop: 0.78, scaleMarginBottom: 0, borderVisible: false });
+        volSeries.setData(data.volume.map((d: any) => ({
+          time: d.time as UTCTimestamp,
+          value: d.value,
+          color: d.color === "#26a69a" ? "rgba(38,166,154,0.6)" : "rgba(239,83,80,0.6)",
+        })));
       }
 
       chart.timeScale().fitContent();
@@ -552,6 +570,29 @@ export default function TradingDashboard() {
                       )}
                     </div>
                     <p className="text-xs text-slate-500 bg-slate-800/50 rounded-lg p-2">{judgment.judge_reason}</p>
+                    {/* Buy/sell volume pressure */}
+                    {indicators && (indicators as any).up_dn_vol_ratio !== undefined && (
+                      <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5">
+                        <div className="text-xs text-slate-500 font-semibold">VOLUME PRESSURE (20-day)</div>
+                        {(() => {
+                          const ratio = (indicators as any).up_dn_vol_ratio as number;
+                          const buyPct = Math.round((ratio / (ratio + 1)) * 100);
+                          const sellPct = 100 - buyPct;
+                          return (
+                            <>
+                              <div className="flex h-2 rounded-full overflow-hidden">
+                                <div className="bg-emerald-500 transition-all" style={{ width: `${buyPct}%` }} />
+                                <div className="bg-red-500 transition-all" style={{ width: `${sellPct}%` }} />
+                              </div>
+                              <div className="flex justify-between text-xs">
+                                <span className="text-emerald-400 font-semibold">▲ Buy {buyPct}%</span>
+                                <span className="text-red-400 font-semibold">▼ Sell {sellPct}%</span>
+                              </div>
+                            </>
+                          );
+                        })()}
+                      </div>
+                    )}
                     {judgment.fear_greed_label && (
                       <div className="text-xs text-center text-slate-500">
                         Market Sentiment: <span className={judgment.fear_greed_score! >= 55 ? "text-emerald-400" : judgment.fear_greed_score! <= 40 ? "text-red-400" : "text-amber-400"}>{judgment.fear_greed_label} ({judgment.fear_greed_score})</span>
@@ -601,20 +642,40 @@ export default function TradingDashboard() {
                   <p className="text-slate-500 text-sm text-center py-6">Run analysis to see options details</p>
                 ) : (
                   <>
-                    <div className="text-center mb-3">
+                    <div className="text-center mb-2">
                       <SignalBadge signal={judgment.signal} size="md" />
                     </div>
-                    {[
-                      ["🎯 Strike", judgment.strike_hint],
-                      ["📅 Expiry", judgment.expiry_hint],
-                      ["⚡ Entry Trigger", judgment.entry_trigger],
-                      ["🛡️ Risk Note", judgment.risk_note],
-                    ].map(([label, val]) => (
-                      <div key={label as string} className="bg-slate-800/60 rounded-xl p-3 space-y-1">
-                        <div className="text-xs text-slate-500 font-semibold">{label}</div>
-                        <div className="text-sm text-slate-200 leading-relaxed">{val}</div>
+                    <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
+                      <div className="text-xs text-slate-500 font-semibold">🎯 STRIKE</div>
+                      <div className="text-sm font-bold text-slate-200">{judgment.strike_hint}</div>
+                    </div>
+                    {/* Expiry date cards */}
+                    {judgment.expiry_weekly && (
+                      <div>
+                        <div className="text-xs text-slate-500 font-semibold mb-1.5">📅 EXPIRY OPTIONS</div>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {[
+                            { label: "Weekly", date: judgment.expiry_weekly, note: "7 DTE", color: "border-emerald-700 bg-emerald-900/20" },
+                            { label: "2-Week", date: judgment.expiry_biweekly, note: "14 DTE", color: "border-blue-700 bg-blue-900/20" },
+                            { label: "Monthly", date: judgment.expiry_monthly, note: "3rd Fri", color: "border-purple-700 bg-purple-900/20" },
+                          ].map(e => (
+                            <div key={e.label} className={`rounded-lg border p-2 text-center ${e.color}`}>
+                              <div className="text-xs text-slate-500">{e.label}</div>
+                              <div className="text-sm font-bold text-white">{e.date}</div>
+                              <div className="text-xs text-slate-500">{e.note}</div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
+                    )}
+                    <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
+                      <div className="text-xs text-slate-500 font-semibold">⚡ ENTRY TRIGGER</div>
+                      <div className="text-sm text-slate-200 leading-relaxed">{judgment.entry_trigger}</div>
+                    </div>
+                    <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
+                      <div className="text-xs text-slate-500 font-semibold">🛡️ RISK NOTE</div>
+                      <div className="text-sm text-slate-200 leading-relaxed">{judgment.risk_note}</div>
+                    </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div className="bg-emerald-900/30 border border-emerald-800/50 rounded-xl p-3 text-center">
                         <div className="text-xs text-slate-500 mb-1">TARGET</div>
@@ -626,7 +687,7 @@ export default function TradingDashboard() {
                       </div>
                     </div>
                     <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-3 text-center">
-                      <div className="text-xs text-slate-500 mb-1">POSITION SIZE (risk budget)</div>
+                      <div className="text-xs text-slate-500 mb-1">POSITION SIZE</div>
                       <div className="text-xl font-black text-blue-400">{judgment.position_size_pct}% of account</div>
                     </div>
                   </>

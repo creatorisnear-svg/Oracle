@@ -577,22 +577,46 @@ def score_indicators_to_direction(ind: dict) -> dict:
     return {"direction": direction, "score": score, "confidence": round(conf, 1)}
 
 
+def _get_option_expiries():
+    """Compute real upcoming options expiry Fridays."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    # Next Friday (at least 1 day away)
+    d = now + timedelta(days=1)
+    while d.weekday() != 4:
+        d += timedelta(days=1)
+    weekly = d.strftime("%b %d")
+    biweekly = (d + timedelta(days=7)).strftime("%b %d")
+    # 3rd Friday of next month
+    nm = now.month % 12 + 1
+    ny = now.year if now.month < 12 else now.year + 1
+    m = datetime(ny, nm, 1, tzinfo=timezone.utc)
+    fc = 0
+    while True:
+        if m.weekday() == 4:
+            fc += 1
+            if fc == 3:
+                break
+        m += timedelta(days=1)
+    monthly = m.strftime("%b %d")
+    return weekly, biweekly, monthly
+
+
 def suggest_options(direction: str, price: float, atr: float, ind: dict) -> dict:
     fib = ind.get("fibonacci", {})
     pivots = ind.get("pivot_levels", {})
+    weekly, biweekly, monthly = _get_option_expiries()
 
     if direction == "BULLISH":
         action = "BUY_CALL"
-        # Use R1 as strike hint if available
         strike_raw = pivots.get("r1", price * 1.005)
         strike = round(strike_raw / 5) * 5
         if strike <= price: strike += 5
         target = round(price + 3 * atr, 2)
         stop = round(price - 2 * atr, 2)
-        # Near Fibonacci 61.8% = high confidence
         fib618 = fib.get("fib_618", 0)
-        conf_boost = "61.8% Fibonacci support near entry. " if fib618 and abs(price - fib618) / price < 0.02 else ""
-        expiry = "7-14 DTE (weeklies or next monthly)"
+        conf_boost = "61.8% Fib support near entry. " if fib618 and abs(price - fib618) / price < 0.02 else ""
+        expiry = f"Weekly: {weekly}  |  2-Week: {biweekly}  |  Monthly: {monthly}"
         entry_trigger = f"{conf_boost}Price clears ${round(price * 1.005, 2):.2f} on volume ≥ 1.3× avg"
         risk_note = f"Close call if price breaks ${stop:.2f} (2×ATR). Max loss = premium paid."
     elif direction == "BEARISH":
@@ -603,8 +627,8 @@ def suggest_options(direction: str, price: float, atr: float, ind: dict) -> dict
         target = round(price - 3 * atr, 2)
         stop = round(price + 2 * atr, 2)
         fib382 = fib.get("fib_382", 0)
-        conf_boost = "38.2% Fibonacci resistance near entry. " if fib382 and abs(price - fib382) / price < 0.02 else ""
-        expiry = "7-14 DTE (weeklies or next monthly)"
+        conf_boost = "38.2% Fib resistance near entry. " if fib382 and abs(price - fib382) / price < 0.02 else ""
+        expiry = f"Weekly: {weekly}  |  2-Week: {biweekly}  |  Monthly: {monthly}"
         entry_trigger = f"{conf_boost}Price breaks ${round(price * 0.995, 2):.2f} on volume ≥ 1.3× avg"
         risk_note = f"Close put if price recovers above ${stop:.2f} (2×ATR). Max loss = premium paid."
     else:
@@ -612,8 +636,8 @@ def suggest_options(direction: str, price: float, atr: float, ind: dict) -> dict
         strike = round(price / 5) * 5
         target = price
         stop = round(price - 2 * atr, 2)
-        expiry = "Wait for clearer setup"
-        entry_trigger = "No clear entry — wait for 6/9 agent consensus"
+        expiry = f"Next setups: {weekly} / {biweekly} / {monthly}"
+        entry_trigger = "No clear entry — wait for 5/9 agent consensus"
         risk_note = "No position recommended. Mixed signals or choppy market."
 
     vola = ind.get("volatility_20d", 20)
@@ -626,6 +650,9 @@ def suggest_options(direction: str, price: float, atr: float, ind: dict) -> dict
         "action": action,
         "strike_hint": f"${strike:.0f} strike",
         "expiry_hint": expiry,
+        "expiry_weekly": weekly,
+        "expiry_biweekly": biweekly,
+        "expiry_monthly": monthly,
         "entry_trigger": entry_trigger,
         "risk_note": risk_note,
         "target_price": target,

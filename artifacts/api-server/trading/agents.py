@@ -731,19 +731,26 @@ class JudgeAgent:
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
         opts = suggest_options(direction, price, atr, ind)
 
-        # Forecast line (project 7 candles forward)
+        # Forecast line — real trading days + S-curve easing
+        from datetime import datetime, timedelta, timezone
         forecast = []
         now_ts = int(time.time())
-        for i in range(1, 8):
-            if signal == "BUY_CALL":
-                proj = price + atr * 0.4 * i
-                proj = min(proj, target)
-            elif signal == "BUY_PUT":
-                proj = price - atr * 0.4 * i
-                proj = max(proj, target)
-            else:
-                proj = price
-            forecast.append({"time": now_ts + i * 86400, "value": round(proj, 2)})
+        if signal != "HOLD":
+            dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+            trading_days = []
+            while len(trading_days) < 7:
+                dt += timedelta(days=1)
+                if dt.weekday() < 5:  # Mon–Fri only
+                    trading_days.append(int(dt.timestamp()))
+            max_move = min(atr * 1.2, abs(target - price))
+            for i, ts in enumerate(trading_days):
+                progress = (i + 1) / 7
+                ease = progress * progress * (3 - 2 * progress)  # smooth S-curve
+                if signal == "BUY_CALL":
+                    proj = min(price + max_move * ease, target)
+                else:
+                    proj = max(price - max_move * ease, target)
+                forecast.append({"time": ts, "value": round(proj, 2)})
 
         vola = ind.get("volatility_20d", 25)
         pos_size = max(1, 5 - int(vola / 15))
@@ -769,6 +776,9 @@ class JudgeAgent:
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],
             "expiry_hint": opts["expiry_hint"],
+            "expiry_weekly": opts.get("expiry_weekly", ""),
+            "expiry_biweekly": opts.get("expiry_biweekly", ""),
+            "expiry_monthly": opts.get("expiry_monthly", ""),
             "entry_trigger": opts["entry_trigger"],
             "risk_note": opts["risk_note"],
             "forecast_line": forecast,
