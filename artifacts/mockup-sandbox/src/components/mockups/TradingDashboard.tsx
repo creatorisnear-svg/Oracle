@@ -39,6 +39,14 @@ interface NewsItem {
   title: string; summary?: string; source: string;
   url: string; published_at: string; category?: string;
 }
+interface OptionRow {
+  strike: number; last: number; bid: number; ask: number; mid: number;
+  volume: number; open_interest: number; iv: number; itm: boolean; delta: number;
+}
+interface OptionsChain {
+  symbol: string; price: number; selected_expiry: string;
+  available_expiries: string[]; calls: OptionRow[]; puts: OptionRow[];
+}
 interface FearGreedComp { name: string; score: number; value: number; label: string; weight: number; }
 interface FearGreed { score: number; label: string; color: string; components: FearGreedComp[]; }
 interface AccuracyAgent {
@@ -145,7 +153,7 @@ export default function TradingDashboard() {
   const [judgment, setJudgment] = useState<Judgment | null>(null);
   const [status, setStatus] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
-  const [tab, setTab] = useState<"signal" | "agents" | "options" | "news" | "fear" | "accuracy">("signal");
+  const [tab, setTab] = useState<"signal" | "agents" | "options" | "chain" | "news" | "fear" | "accuracy">("signal");
   const [period, setPeriod] = useState("3mo");
   const [indicators, setIndicators] = useState<Record<string, unknown>>({});
   const [politicalNews, setPoliticalNews] = useState<NewsItem[]>([]);
@@ -153,6 +161,10 @@ export default function TradingDashboard() {
   const [accuracy, setAccuracy] = useState<AccuracyReport | null>(null);
   const [fearLoading, setFearLoading] = useState(false);
   const [indicators_visible, setIndicatorsVisible] = useState({ ema: true, bb: false, vwap: true, st: false });
+  const [chain, setChain] = useState<OptionsChain | null>(null);
+  const [chainLoading, setChainLoading] = useState(false);
+  const [chainExpiry, setChainExpiry] = useState("");
+  const [chainSide, setChainSide] = useState<"calls" | "puts">("calls");
 
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -267,6 +279,21 @@ export default function TradingDashboard() {
       console.error("Chart load error", e);
     }
   }, [indicators_visible]);
+
+  const fetchChain = useCallback(async (sym: string, expiry = "") => {
+    setChainLoading(true);
+    try {
+      const url = `/api/options-chain/${sym}${expiry ? `?expiry=${encodeURIComponent(expiry)}` : ""}`;
+      const res = await fetch(url);
+      const data: OptionsChain = await res.json();
+      setChain(data);
+      if (!expiry && data.selected_expiry) setChainExpiry(data.selected_expiry);
+    } catch (e) {
+      console.error("Options chain fetch error", e);
+    } finally {
+      setChainLoading(false);
+    }
+  }, []);
 
   const drawPrediction = useCallback((j: Judgment) => {
     if (!chartRef.current || !j.forecast_line?.length) return;
@@ -513,10 +540,13 @@ export default function TradingDashboard() {
           {/* Tabs */}
           <div className="flex flex-wrap gap-1 p-2 border-b border-slate-800 shrink-0">
             {([
-              ["signal","SIGNAL"],["agents","AGENTS"],["options","OPTIONS"],
+              ["signal","SIGNAL"],["agents","AGENTS"],["options","OPTIONS"],["chain","CHAIN"],
               ["news","NEWS"],["fear","F&G"],["accuracy","ACCURACY"]
             ] as const).map(([t, label]) => (
-              <button key={t} onClick={() => setTab(t)} className={TAB_CLASSES(t)}>{label}</button>
+              <button key={t} onClick={() => {
+                setTab(t);
+                if (t === "chain" && symbol) fetchChain(symbol);
+              }} className={TAB_CLASSES(t)}>{label}</button>
             ))}
           </div>
 
@@ -689,6 +719,86 @@ export default function TradingDashboard() {
                     <div className="bg-blue-900/20 border border-blue-800/30 rounded-xl p-3 text-center">
                       <div className="text-xs text-slate-500 mb-1">POSITION SIZE</div>
                       <div className="text-xl font-black text-blue-400">{judgment.position_size_pct}% of account</div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── CHAIN TAB ── */}
+            {tab === "chain" && (
+              <div className="space-y-2">
+                {chainLoading && (
+                  <div className="text-center py-8 text-slate-500 text-sm animate-pulse">Loading options chain…</div>
+                )}
+                {!chainLoading && !chain && (
+                  <p className="text-slate-500 text-sm text-center py-6">Click CHAIN to load live options data</p>
+                )}
+                {!chainLoading && chain && (chain as any).error && (
+                  <p className="text-red-400 text-sm text-center py-6">{(chain as any).error}</p>
+                )}
+                {!chainLoading && chain && !(chain as any).error && (
+                  <>
+                    {/* Header */}
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs font-bold text-slate-300">{chain.symbol} — ${chain.price.toFixed(2)}</div>
+                      <button onClick={() => fetchChain(symbol)} className="text-xs text-blue-400 hover:text-blue-300">↻ Refresh</button>
+                    </div>
+
+                    {/* Expiry selector */}
+                    <div className="flex flex-wrap gap-1">
+                      {chain.available_expiries.map(exp => (
+                        <button key={exp} onClick={() => { setChainExpiry(exp); fetchChain(symbol, exp); }}
+                          className={`px-2 py-0.5 rounded text-xs font-mono transition-colors ${exp === chainExpiry ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
+                          {exp}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Calls / Puts toggle */}
+                    <div className="flex rounded-lg overflow-hidden border border-slate-700 text-xs font-bold">
+                      <button onClick={() => setChainSide("calls")}
+                        className={`flex-1 py-1.5 transition-colors ${chainSide === "calls" ? "bg-emerald-700 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
+                        CALLS ({chain.calls.length})
+                      </button>
+                      <button onClick={() => setChainSide("puts")}
+                        className={`flex-1 py-1.5 transition-colors ${chainSide === "puts" ? "bg-red-700 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}>
+                        PUTS ({chain.puts.length})
+                      </button>
+                    </div>
+
+                    {/* Column headers */}
+                    <div className="grid text-xs text-slate-500 font-semibold px-1" style={{ gridTemplateColumns: "3fr 2fr 2fr 2fr 2fr 2fr" }}>
+                      <span>STRIKE</span><span className="text-right">MID</span><span className="text-right">IV%</span>
+                      <span className="text-right">VOL</span><span className="text-right">OI</span><span className="text-right">Δ</span>
+                    </div>
+
+                    {/* Rows */}
+                    <div className="space-y-px">
+                      {chain[chainSide].map((row) => {
+                        const isAtm = Math.abs(row.strike - chain.price) / chain.price < 0.02;
+                        const bg = row.itm
+                          ? chainSide === "calls" ? "bg-emerald-900/25" : "bg-red-900/25"
+                          : "bg-slate-800/40";
+                        return (
+                          <div key={row.strike}
+                            className={`grid items-center rounded px-1.5 py-1 text-xs font-mono ${bg} ${isAtm ? "ring-1 ring-yellow-500/60" : ""}`}
+                            style={{ gridTemplateColumns: "3fr 2fr 2fr 2fr 2fr 2fr" }}>
+                            <span className={`font-bold ${isAtm ? "text-yellow-400" : row.itm ? (chainSide === "calls" ? "text-emerald-400" : "text-red-400") : "text-slate-300"}`}>
+                              ${row.strike.toFixed(0)}{isAtm ? " ◀" : ""}
+                            </span>
+                            <span className="text-right text-white">${row.mid.toFixed(2)}</span>
+                            <span className={`text-right ${row.iv > 60 ? "text-orange-400" : row.iv > 40 ? "text-yellow-400" : "text-slate-400"}`}>{row.iv}%</span>
+                            <span className="text-right text-slate-400">{row.volume > 999 ? `${(row.volume / 1000).toFixed(1)}k` : row.volume}</span>
+                            <span className="text-right text-slate-400">{row.open_interest > 999 ? `${(row.open_interest / 1000).toFixed(1)}k` : row.open_interest}</span>
+                            <span className={`text-right ${chainSide === "calls" ? "text-emerald-400" : "text-red-400"}`}>{row.delta > 0 ? "+" : ""}{row.delta.toFixed(2)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div className="text-xs text-slate-600 text-center pt-1">
+                      ◀ = at-the-money · highlighted = in-the-money
                     </div>
                   </>
                 )}

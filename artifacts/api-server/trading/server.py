@@ -237,6 +237,73 @@ def political_news():
         return {"error": str(e), "news": []}
 
 
+@app.get("/api/options-chain/{symbol}")
+def options_chain(symbol: str, expiry: str = ""):
+    """Live options chain — calls & puts near the money, with IV, OI, bid/ask."""
+    sym = symbol.upper()
+    try:
+        t = yf.Ticker(sym)
+        dates = t.options
+        if not dates:
+            return {"error": "No options data available", "symbol": sym}
+
+        # Pick expiry — default to first available, or the requested one
+        selected = expiry if expiry in dates else dates[0]
+        chain = t.option_chain(selected)
+
+        # Current price for ITM detection and filtering
+        price = 0.0
+        try:
+            price = safe_float(getattr(t.fast_info, "last_price", None) or
+                               getattr(t.fast_info, "regularMarketPrice", None))
+        except Exception:
+            pass
+
+        def clean_chain(df, side: str):
+            rows = []
+            for _, r in df.iterrows():
+                strike = safe_float(r.get("strike", 0))
+                if price > 0 and abs(strike - price) / price > 0.15:
+                    continue  # only show ±15% from current price
+                last  = safe_float(r.get("lastPrice", 0))
+                bid   = safe_float(r.get("bid", 0))
+                ask   = safe_float(r.get("ask", 0))
+                mid   = round((bid + ask) / 2, 2) if bid and ask else last
+                vol   = int(r.get("volume", 0) or 0)
+                oi    = int(r.get("openInterest", 0) or 0)
+                iv    = round(safe_float(r.get("impliedVolatility", 0)) * 100, 1)
+                itm   = bool(r.get("inTheMoney", False))
+                delta_est = 0.0
+                if price > 0 and side == "call":
+                    delta_est = round(min(0.99, max(0.01, (price - strike * 0.995) / (price * 0.15 + 1))), 2)
+                elif price > 0 and side == "put":
+                    delta_est = round(-min(0.99, max(0.01, (strike * 1.005 - price) / (price * 0.15 + 1))), 2)
+                rows.append({
+                    "strike": strike, "last": last, "bid": bid, "ask": ask,
+                    "mid": mid, "volume": vol, "open_interest": oi,
+                    "iv": iv, "itm": itm, "delta": delta_est,
+                })
+            rows.sort(key=lambda x: x["strike"])
+            return rows
+
+        calls = clean_chain(chain.calls, "call")
+        puts  = clean_chain(chain.puts, "put")
+
+        return {
+            "symbol": sym,
+            "price": round(price, 2),
+            "selected_expiry": selected,
+            "available_expiries": list(dates[:8]),
+            "calls": calls,
+            "puts": puts,
+            "calls_count": len(calls),
+            "puts_count": len(puts),
+        }
+    except Exception as e:
+        logger.error(f"Options chain error {sym}: {e}")
+        return {"error": str(e), "symbol": sym}
+
+
 @app.get("/api/accuracy")
 def accuracy_report():
     """Full accuracy report across all agents and signals with method descriptions."""
