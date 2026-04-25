@@ -65,9 +65,18 @@ Each prediction includes:
 - Risk/Reward ratio, position size, agreed/disagreed agents
 
 ## Back-Testing & Tests
-- `python3 artifacts/api-server/trading/tests/test_agents.py` — 42 unit tests for all 9 agents + Judge + Kelly
+- `python3 artifacts/api-server/trading/tests/test_agents.py` — 43 unit tests for all 9 agents + Judge + Kelly + track record
 - `python3 artifacts/api-server/trading/tests/backtest.py [SYMBOLS...]` — directional accuracy + target hit + forecast MAE per stock
 - `python3 artifacts/api-server/trading/tests/compute_regime_stats.py` — re-derive `regime_stats.json` from history (used by Kelly sizer)
+- `python3 artifacts/api-server/trading/tests/compute_track_record.py` — re-derive `track_record.json` (per-stock 2-year hit rates shown in UI)
+
+## Per-Stock Track Record (`track_record.json`)
+The model's hit rate varies dramatically by symbol:
+- **Strong (≥65%)**: META 80%, SPY 71%, MSFT 70%, QQQ 59% — model has genuine edge
+- **Weak (45-55%)**: GOOGL 56%, TSLA/AMZN 50%, AAPL 44% — coin-flip territory
+- **Poor (<45%)**: NVDA 12.5% — model historically wrong here
+
+The dashboard shows this honestly so users don't act on misleading confidence on stocks where the model has no edge. When the historical track record is poor, the displayed confidence is also automatically capped at 55%.
 
 ## Kelly Position Sizer (`kelly.py`)
 Every signal includes a `kelly` field with regime-aware position sizing:

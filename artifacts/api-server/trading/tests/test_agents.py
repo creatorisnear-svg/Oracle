@@ -183,6 +183,16 @@ sz_bad = compute_position_size(signal="BUY_CALL", confidence=70, entry=100, targ
 sz_good = compute_position_size(signal="BUY_CALL", confidence=70, entry=100, target=106, stop=98, atr_pct=2.5)
 check("better R:R → larger position", sz_good["kelly_pct"] >= sz_bad["kelly_pct"])
 
+print("\n[BONUS] Track-record helper")
+from agents import get_track_record  # noqa: E402
+
+_tr = get_track_record("META")
+check("returns dict for tracked symbol with enough samples", _tr is not None and "hit_rate" in _tr)
+check("rating field is one of strong/good/weak/poor",
+      _tr is None or _tr["rating"] in ("strong", "good", "weak", "poor"))
+check("returns None for unknown symbol", get_track_record("ZZZZ") is None)
+check("returns None for empty symbol", get_track_record("") is None)
+
 # Final summary
 print("\n" + "=" * 60)
 n_pass = sum(1 for s, _ in results if s == PASS)

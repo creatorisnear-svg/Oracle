@@ -34,6 +34,11 @@ interface Judgment {
     win_prob_used: number; rr_planned: number; kelly_raw: number;
     explanation: string;
   };
+  track_record?: {
+    hit_rate: number; signals: number;
+    rating: "strong" | "good" | "weak" | "poor";
+    note: string;
+  } | null;
 }
 interface LivePrice {
   symbol: string; price: number; change_pct: number;
@@ -865,6 +870,27 @@ export default function TradingDashboard() {
                       <div className="text-xs text-slate-500 mb-1">POSITION SIZE</div>
                       <div className="text-xl font-black text-blue-400">{judgment.position_size_pct}% of account</div>
                     </div>
+                    {judgment.track_record && (
+                      <div className={`rounded-xl p-3 border ${
+                        judgment.track_record.rating === "strong" ? "bg-emerald-900/20 border-emerald-800/40" :
+                        judgment.track_record.rating === "good"   ? "bg-sky-900/20 border-sky-800/40" :
+                        judgment.track_record.rating === "weak"   ? "bg-amber-900/20 border-amber-800/40" :
+                                                                    "bg-red-900/20 border-red-800/40"
+                      }`}>
+                        <div className="flex items-baseline justify-between mb-1">
+                          <div className={`text-xs font-bold tracking-wider ${
+                            judgment.track_record.rating === "strong" ? "text-emerald-400" :
+                            judgment.track_record.rating === "good"   ? "text-sky-400" :
+                            judgment.track_record.rating === "weak"   ? "text-amber-400" :
+                                                                        "text-red-400"
+                          }`}>📊 MODEL TRACK RECORD</div>
+                          <div className="text-2xl font-black font-mono">
+                            {judgment.track_record.hit_rate.toFixed(0)}%
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-slate-300">{judgment.track_record.note}</div>
+                      </div>
+                    )}
                     {judgment.kelly && (
                       <div className="bg-emerald-900/20 border border-emerald-800/40 rounded-xl p-3">
                         <div className="flex items-baseline justify-between mb-1">
