@@ -1,0 +1,24 @@
+> @workspace/mockup-sandbox@2.0.0 dev C:\Users\gialg\Oracle\artifacts\mockup-sandbox
+> vite dev
+
+failed to load config from C:\Users\gialg\Oracle\artifacts\mockup-sandbox\vite.config.ts
+error when starting dev server:
+Error: The package "@esbuild/win32-x64" could not be found, and is needed by esbuild.
+
+If you are installing esbuild with npm, make sure that you don't specify the
+"--no-optional" or "--omit=optional" flags. The "optionalDependencies" feature
+of "package.json" is used by esbuild to install the correct binary executable
+for your current platform.
+    at generateBinPath (C:\Users\gialg\Oracle\node_modules\.pnpm\esbuild@0.27.3\node_modules\esbuild\lib\main.js:1750:15)
+    at esbuildCommandAndArgs (C:\Users\gialg\Oracle\node_modules\.pnpm\esbuild@0.27.3\node_modules\esbuild\lib\main.js:1820:33)
+    at ensureServiceIsRunning (C:\Users\gialg\Oracle\node_modules\.pnpm\esbuild@0.27.3\node_modules\esbuild\lib\main.js:1977:25)
+    at build (C:\Users\gialg\Oracle\node_modules\.pnpm\esbuild@0.27.3\node_modules\esbuild\lib\main.js:1876:26)
+    at bundleConfigFile (file:///C:/Users/gialg/Oracle/node_modules/.pnpm/vite@7.3.2_@types+node@25.3_d5269a53d302b42e602832b0eaecec0c/node_modules/vite/dist/node/chunks/config.js:35819:23)
+    at bundleAndLoadConfigFile (file:///C:/Users/gialg/Oracle/node_modules/.pnpm/vite@7.3.2_@types+node@25.3_d5269a53d302b42e602832b0eaecec0c/node_modules/vite/dist/node/chunks/config.js:35806:24)
+    at loadConfigFromFile (file:///C:/Users/gialg/Oracle/node_modules/.pnpm/vite@7.3.2_@types+node@25.3_d5269a53d302b42e602832b0eaecec0c/node_modules/vite/dist/node/chunks/config.js:35775:179)
+    at resolveConfig (file:///C:/Users/gialg/Oracle/node_modules/.pnpm/vite@7.3.2_@types+node@25.3_d5269a53d302b42e602832b0eaecec0c/node_modules/vite/dist/node/chunks/config.js:35424:28)
+    at _createServer (file:///C:/Users/gialg/Oracle/node_modules/.pnpm/vite@7.3.2_@types+node@25.3_d5269a53d302b42e602832b0eaecec0c/node_modules/vite/dist/node/chunks/config.js:25365:73)
+    at createServer$2 (file:///C:/Users/gialg/Oracle/node_modules/.pnpm/vite@7.3.2_@types+node@25.3_d5269a53d302b42e602832b0eaecec0c/node_modules/vite/dist/node/chunks/config.js:25362:9)
+ ELIFECYCLE  Command failed with exit code 1.
+
+C:\Users\gialg\Oracle\artifacts\mockup-sandbox>
