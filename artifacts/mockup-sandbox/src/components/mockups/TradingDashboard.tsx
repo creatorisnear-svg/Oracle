@@ -280,7 +280,12 @@ export default function TradingDashboard() {
   const [judgment, setJudgment] = useState<Judgment | null>(null);
   const [status, setStatus] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
-  const [tab, setTab] = useState<"signal" | "agents" | "options" | "chain" | "news" | "fear" | "accuracy">("signal");
+  const [tab, setTab] = useState<"signal" | "agents" | "options" | "chain" | "news" | "fear" | "accuracy" | "paper">("signal");
+  const [paperAccount, setPaperAccount] = useState<any>(null);
+  const [paperOpen, setPaperOpen] = useState<any[]>([]);
+  const [paperHistory, setPaperHistory] = useState<any[]>([]);
+  const [paperLoading, setPaperLoading] = useState(false);
+  const [paperToast, setPaperToast] = useState<string>("");
   const [period, setPeriod] = useState("3mo");
   const [horizon, setHorizon] = useState<string>("swing");
   const [horizons, setHorizons] = useState<Horizon[]>([]);
@@ -566,6 +571,75 @@ export default function TradingDashboard() {
     } catch {}
   }, []);
 
+  // ── Paper trading helpers ──────────────────────────────────────────────
+  const showPaperToast = (msg: string) => {
+    setPaperToast(msg);
+    setTimeout(() => setPaperToast(""), 4000);
+  };
+  const loadPaperData = useCallback(async () => {
+    try {
+      setPaperLoading(true);
+      const [acctRes, openRes, histRes] = await Promise.all([
+        fetch(`${API_BASE}/paper/account`),
+        fetch(`${API_BASE}/paper/positions?status=open`),
+        fetch(`${API_BASE}/paper/positions?status=closed`),
+      ]);
+      if (acctRes.ok) setPaperAccount(await acctRes.json());
+      if (openRes.ok) {
+        const d = await openRes.json();
+        setPaperOpen(d.positions || []);
+        if (d.auto_closed?.length) {
+          const c = d.auto_closed[0];
+          showPaperToast(`Auto-closed ${c.symbol} (${c.close_reason}) → P/L $${(c.pnl || 0).toFixed(2)}`);
+        }
+      }
+      if (histRes.ok) { const d = await histRes.json(); setPaperHistory(d.positions || []); }
+    } finally { setPaperLoading(false); }
+  }, []);
+  const tradeCurrentSignal = useCallback(async () => {
+    if (!judgment || judgment.signal === "HOLD") return;
+    try {
+      setPaperLoading(true);
+      const res = await fetch(`${API_BASE}/paper/open`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol, signal: judgment.signal, horizon,
+          entry: judgment.entry_price,
+          target: judgment.target_price,
+          stop: judgment.stop_loss,
+          confidence: judgment.confidence,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) { showPaperToast(`Trade failed: ${data.error}`); }
+      else {
+        showPaperToast(`Opened ${data.signal === "BUY_CALL" ? "CALL" : "PUT"} on ${data.symbol} @ $${data.entry_price.toFixed(2)}`);
+        await loadPaperData();
+      }
+    } catch (e: any) { showPaperToast(`Trade failed: ${e?.message || e}`); }
+    finally { setPaperLoading(false); }
+  }, [judgment, symbol, horizon, loadPaperData]);
+  const closePaperPosition = useCallback(async (id: number) => {
+    try {
+      setPaperLoading(true);
+      const res = await fetch(`${API_BASE}/paper/close/${id}`, { method: "POST" });
+      const data = await res.json();
+      if (data.error) showPaperToast(data.error);
+      else {
+        showPaperToast(`Closed ${data.symbol} → P/L $${(data.pnl || 0).toFixed(2)}`);
+        await loadPaperData();
+      }
+    } finally { setPaperLoading(false); }
+  }, [loadPaperData]);
+  const resetPaperAccount = useCallback(async () => {
+    if (!confirm("Reset paper account to $10,000 and close all positions?")) return;
+    setPaperLoading(true);
+    await fetch(`${API_BASE}/paper/reset`, { method: "POST" });
+    await loadPaperData();
+    showPaperToast("Account reset to $10,000");
+  }, [loadPaperData]);
+
   useEffect(() => {
     loadFearGreed();
     loadAccuracy();
@@ -581,9 +655,18 @@ export default function TradingDashboard() {
         }
       } catch {}
     })();
+    loadPaperData();
     const iv = setInterval(() => { loadFearGreed(); loadAccuracy(); }, 120000);
     return () => clearInterval(iv);
   }, []);
+
+  // Live mark-to-market refresh while on the Paper tab
+  useEffect(() => {
+    if (tab !== "paper") return;
+    loadPaperData();
+    const iv = setInterval(loadPaperData, 20000);
+    return () => clearInterval(iv);
+  }, [tab, loadPaperData]);
 
   // ── WebSocket analysis ────────────────────────────────────────────────
   const runAnalysis = useCallback((sym: string) => {
@@ -860,11 +943,12 @@ export default function TradingDashboard() {
           <div className="flex flex-wrap gap-1 p-2 border-b border-slate-800 shrink-0">
             {([
               ["signal","SIGNAL"],["agents","AGENTS"],["options","OPTIONS"],["chain","CHAIN"],
-              ["news","NEWS"],["fear","F&G"],["accuracy","ACCURACY"]
+              ["news","NEWS"],["fear","F&G"],["accuracy","ACCURACY"],["paper","PAPER 💰"]
             ] as const).map(([t, label]) => (
               <button key={t} onClick={() => {
                 setTab(t);
                 if (t === "chain" && symbol) fetchChain(symbol);
+                if (t === "paper") loadPaperData();
               }} className={TAB_CLASSES(t)}>{label}</button>
             ))}
           </div>
@@ -922,6 +1006,19 @@ export default function TradingDashboard() {
                         </div>
                       )}
                     </div>
+                    {judgment.signal !== "HOLD" && (
+                      <button
+                        onClick={tradeCurrentSignal}
+                        disabled={paperLoading}
+                        className={`w-full py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-50 ${
+                          judgment.signal === "BUY_CALL"
+                            ? "bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20"
+                            : "bg-red-600 hover:bg-red-500 text-white shadow-red-500/20"
+                        } shadow-lg`}
+                      >
+                        💰 Paper Trade This {judgment.signal === "BUY_CALL" ? "CALL" : "PUT"}
+                      </button>
+                    )}
                     {judgment.macro_context && (
                       <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5">
                         <div className="text-xs text-slate-500 font-semibold">MACRO CONTEXT</div>
@@ -1407,6 +1504,167 @@ export default function TradingDashboard() {
                 ) : (
                   <div className="text-center py-6">
                     <p className="text-slate-500 text-sm">Loading accuracy data...</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── PAPER TRADING TAB ── */}
+            {tab === "paper" && (
+              <div className="space-y-3">
+                {/* Account Header */}
+                {paperAccount && (() => {
+                  const a = paperAccount;
+                  const ret = a.total_return_pct ?? 0;
+                  const retCls = ret > 0 ? "text-emerald-400" : ret < 0 ? "text-red-400" : "text-slate-300";
+                  const unr = a.unrealized_pnl ?? 0;
+                  const unrCls = unr > 0 ? "text-emerald-400" : unr < 0 ? "text-red-400" : "text-slate-400";
+                  return (
+                    <div className="rounded-xl border border-blue-500/30 bg-gradient-to-br from-blue-900/30 to-slate-900/40 p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs text-slate-400 uppercase tracking-wide">Paper Account</div>
+                        <button onClick={resetPaperAccount}
+                          className="text-[10px] text-slate-500 hover:text-red-400 px-2 py-0.5 border border-slate-700 hover:border-red-500/50 rounded">
+                          Reset
+                        </button>
+                      </div>
+                      <div className="flex items-baseline justify-between">
+                        <div>
+                          <div className="text-[10px] text-slate-500 uppercase">Equity</div>
+                          <div className="text-2xl font-bold font-mono">${(a.equity ?? 0).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}</div>
+                        </div>
+                        <div className={`text-right ${retCls}`}>
+                          <div className="text-[10px] uppercase opacity-70">Return</div>
+                          <div className="text-lg font-bold font-mono">{ret >= 0 ? "+" : ""}{ret.toFixed(2)}%</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1.5 text-[11px] pt-1 border-t border-slate-700/50">
+                        <div>
+                          <div className="text-slate-500">Cash</div>
+                          <div className="font-mono font-semibold">${(a.cash ?? 0).toFixed(0)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">Held</div>
+                          <div className="font-mono font-semibold">${(a.held_value ?? 0).toFixed(0)}</div>
+                        </div>
+                        <div>
+                          <div className="text-slate-500">Unrealized</div>
+                          <div className={`font-mono font-semibold ${unrCls}`}>{unr >= 0 ? "+" : ""}${unr.toFixed(2)}</div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Quick-trade card */}
+                {judgment && judgment.signal !== "HOLD" && (
+                  <div className="rounded-xl border border-emerald-500/30 bg-emerald-900/10 p-2.5 flex items-center justify-between gap-2">
+                    <div className="text-xs">
+                      <div className="text-slate-400">Current Signal</div>
+                      <div className="font-bold">
+                        <span className={judgment.signal === "BUY_CALL" ? "text-emerald-400" : "text-red-400"}>
+                          {judgment.signal === "BUY_CALL" ? "CALL" : "PUT"}
+                        </span>
+                        <span className="text-slate-300"> {symbol} @ ${judgment.entry_price.toFixed(2)}</span>
+                      </div>
+                    </div>
+                    <button onClick={tradeCurrentSignal} disabled={paperLoading}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded text-xs font-bold">
+                      Trade Now
+                    </button>
+                  </div>
+                )}
+
+                {/* Open Positions */}
+                <div>
+                  <div className="text-xs text-slate-500 font-semibold mb-1.5 flex items-center justify-between">
+                    <span>OPEN POSITIONS ({paperOpen.length})</span>
+                    <button onClick={loadPaperData} className="text-blue-400 hover:text-blue-300 font-normal">↻</button>
+                  </div>
+                  {paperOpen.length === 0 ? (
+                    <div className="text-center py-4 text-slate-500 text-xs border border-dashed border-slate-700 rounded-lg">
+                      No open positions. Analyze a stock and click Trade Now.
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {paperOpen.map((p) => {
+                        const pnl = p.unrealized_pnl ?? 0;
+                        const pnlPct = p.unrealized_pnl_pct ?? 0;
+                        const pnlCls = pnl > 0 ? "text-emerald-400" : pnl < 0 ? "text-red-400" : "text-slate-400";
+                        const sigCls = p.signal === "BUY_CALL" ? "bg-emerald-500/20 text-emerald-300" : "bg-red-500/20 text-red-300";
+                        return (
+                          <div key={p.id} className="rounded-lg border border-slate-700 bg-slate-800/40 p-2 text-xs space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${sigCls}`}>
+                                  {p.signal === "BUY_CALL" ? "CALL" : "PUT"}
+                                </span>
+                                <span className="font-bold">{p.symbol}</span>
+                                <span className="text-slate-500 text-[10px]">{p.horizon}</span>
+                              </div>
+                              <button onClick={() => closePaperPosition(p.id)} disabled={paperLoading}
+                                className="text-[10px] px-1.5 py-0.5 border border-slate-600 hover:border-red-400 hover:text-red-400 rounded">
+                                Close
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-3 gap-1 text-[10px] text-slate-400">
+                              <div>Entry <span className="text-slate-200 font-mono">${p.entry_price.toFixed(2)}</span></div>
+                              <div>Now <span className="text-slate-200 font-mono">{p.current_price ? `$${p.current_price.toFixed(2)}` : "—"}</span></div>
+                              <div>Cost <span className="text-slate-200 font-mono">${p.cost.toFixed(0)}</span></div>
+                              <div>Target <span className="text-emerald-300 font-mono">${p.target_price.toFixed(2)}</span></div>
+                              <div>Stop <span className="text-red-300 font-mono">${p.stop_loss.toFixed(2)}</span></div>
+                              <div>Conf <span className="text-slate-200 font-mono">{p.confidence?.toFixed(0) ?? "—"}%</span></div>
+                            </div>
+                            <div className="flex items-center justify-between border-t border-slate-700 pt-1">
+                              <span className="text-slate-500 text-[10px]">Unrealized P/L</span>
+                              <span className={`font-mono font-bold ${pnlCls}`}>
+                                {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)} ({pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%)
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Closed History */}
+                {paperHistory.length > 0 && (
+                  <div>
+                    <div className="text-xs text-slate-500 font-semibold mb-1.5">
+                      HISTORY ({paperHistory.length}) · Win Rate {paperAccount?.stats?.win_rate ?? 0}%
+                    </div>
+                    <div className="space-y-1">
+                      {paperHistory.slice(0, 12).map((p) => {
+                        const pnl = p.pnl ?? 0;
+                        const pnlCls = pnl > 0 ? "text-emerald-400" : pnl < 0 ? "text-red-400" : "text-slate-400";
+                        const reason = p.close_reason || "—";
+                        const reasonCls = reason === "target" ? "text-emerald-400"
+                                        : reason === "stop"   ? "text-red-400"
+                                        : "text-slate-400";
+                        return (
+                          <div key={p.id} className="flex items-center justify-between text-[11px] px-2 py-1 border-b border-slate-800/60">
+                            <div className="flex items-center gap-1.5">
+                              <span className={p.signal === "BUY_CALL" ? "text-emerald-400" : "text-red-400"}>
+                                {p.signal === "BUY_CALL" ? "▲" : "▼"}
+                              </span>
+                              <span className="font-bold w-12">{p.symbol}</span>
+                              <span className={`${reasonCls} text-[10px]`}>{reason}</span>
+                            </div>
+                            <span className={`font-mono font-bold ${pnlCls}`}>
+                              {pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Toast */}
+                {paperToast && (
+                  <div className="fixed bottom-4 right-4 bg-slate-800 border border-blue-500/50 text-blue-300 px-3 py-2 rounded-lg text-sm shadow-lg z-50">
+                    {paperToast}
                   </div>
                 )}
               </div>

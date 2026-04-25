@@ -1,3 +1,28 @@
+# TradeSignal AI — 9-Agent Trading Prediction System v6.1
+
+## Paper Trading (v6.1)
+A simulated trading account is now wired into the system. Every signal can be
+"paper traded" with one click and the system tracks live mark-to-market P/L.
+
+**Backend** (`paper_trading.py`)
+- SQLite tables `paper_account` (single-row balance) + `paper_positions`.
+- Default starting balance: **$10,000**. Each trade uses ~10% of available cash.
+- Live mark-to-market via `_live_price()` in `server.py` (yfinance fast_info).
+- **Auto-close**: positions whose target/stop is hit are closed on every refresh.
+
+**Endpoints**
+- `GET /api/paper/account` — equity, cash, held value, realized + unrealized P/L, win rate.
+- `GET /api/paper/positions?status=open|closed|all` — live-marked positions.
+- `POST /api/paper/open {symbol, signal, horizon, target, stop, confidence}` — opens a position.
+- `POST /api/paper/close/{id}` — manual close at current price.
+- `POST /api/paper/reset` — wipe positions, restore $10k.
+
+**Frontend**
+- New **PAPER 💰** tab with: account header (equity/return/cash/held/unrealized),
+  open positions list (live P/L every 20s), closed history with win rate.
+- **"Paper Trade This CALL/PUT"** button on the SIGNAL tab — one-click execution.
+- Toast notifications for every open/close/auto-close event.
+
 # TradeSignal AI — 9-Agent Trading Prediction System v6
 
 ## Overview

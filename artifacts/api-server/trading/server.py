@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+import paper_trading
 from agents import (
     PriceActionAgent, TechnicalAgent, VolumeAgent,
     SentimentAgent, OptionsFlowAgent, MomentumAgent,
@@ -1004,6 +1005,116 @@ def watchlist(symbols: str = "AAPL,MSFT,NVDA,TSLA,SPY,QQQ"):
         if sym:
             results.append(quick_signal(sym))
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAPER TRADING — simulate buying calls/puts based on signals
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _live_price(symbol: str) -> float | None:
+    """Cheap price lookup for marking paper positions."""
+    try:
+        t = yf.Ticker(symbol)
+        p = safe_float(getattr(t.fast_info, "last_price", None) or
+                       getattr(t.fast_info, "regularMarketPrice", None))
+        if p and p > 0:
+            return float(p)
+    except Exception:
+        pass
+    try:
+        df = yf.download(symbol, period="1d", interval="5m",
+                         progress=False, auto_adjust=False)
+        if df is not None and len(df) > 0:
+            return float(df["Close"].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/paper/account")
+def paper_account():
+    acct = paper_trading.get_account()
+    marked = paper_trading.mark_to_market(_live_price)
+    open_positions = marked["open"]
+    unrealized = sum((p.get("unrealized_pnl") or 0) for p in open_positions)
+    held_value = sum(
+        ((p.get("current_price") or p["entry_price"]) * p["shares"])
+        for p in open_positions
+    )
+    cash = float(acct.get("cash") or 0)
+    starting = float(acct.get("starting_balance") or 10000)
+    equity = round(cash + held_value, 2)
+    s = paper_trading.stats()
+    return {
+        "starting_balance": starting,
+        "cash": round(cash, 2),
+        "held_value": round(held_value, 2),
+        "equity": equity,
+        "unrealized_pnl": round(unrealized, 2),
+        "realized_pnl": round(equity - starting - unrealized, 2),
+        "total_return_pct": round((equity - starting) / starting * 100, 2),
+        "open_positions": len(open_positions),
+        "stats": s,
+        "auto_closed": marked["auto_closed"],
+    }
+
+
+@app.get("/api/paper/positions")
+def paper_positions(status: str = "open"):
+    if status == "open":
+        marked = paper_trading.mark_to_market(_live_price)
+        return {"positions": marked["open"], "auto_closed": marked["auto_closed"]}
+    return {"positions": paper_trading.list_positions(status)}
+
+
+@app.post("/api/paper/open")
+async def paper_open(req: dict):
+    """Open a paper position. Body: {symbol, signal, horizon, entry, target, stop, confidence}.
+    If entry is missing, we use the live price at execution time.
+    """
+    symbol = (req.get("symbol") or "").upper().strip()
+    signal = (req.get("signal") or "").upper().strip()
+    horizon = req.get("horizon") or DEFAULT_HORIZON
+    if not symbol or signal not in ("BUY_CALL", "BUY_PUT"):
+        return {"error": "symbol and signal (BUY_CALL|BUY_PUT) required"}
+    entry = safe_float(req.get("entry") or req.get("entry_price") or 0)
+    target = safe_float(req.get("target") or req.get("target_price") or 0)
+    stop = safe_float(req.get("stop") or req.get("stop_loss") or 0)
+    if entry <= 0:
+        entry = _live_price(symbol) or 0
+    if entry <= 0:
+        return {"error": f"could not get live price for {symbol}"}
+    if target <= 0 or stop <= 0:
+        return {"error": "target_price and stop_loss required"}
+    conf = safe_float(req.get("confidence") or 0)
+    risk = safe_float(req.get("risk_pct") or 0.10) or 0.10
+    pos = paper_trading.open_position(
+        symbol=symbol, signal=signal, horizon=horizon,
+        entry_price=entry, target_price=target, stop_loss=stop,
+        confidence=conf, risk_pct=min(max(risk, 0.01), 1.0),
+    )
+    return pos
+
+
+@app.post("/api/paper/close/{position_id}")
+async def paper_close(position_id: int):
+    # Look up symbol from the position
+    rows = paper_trading.list_positions("open")
+    target = next((p for p in rows if p["id"] == position_id), None)
+    if not target:
+        return {"error": "position not found or already closed"}
+    price = _live_price(target["symbol"])
+    if price is None:
+        return {"error": "could not get live price"}
+    closed = paper_trading.close_position(position_id, price, reason="manual")
+    if not closed:
+        return {"error": "close failed"}
+    return closed
+
+
+@app.post("/api/paper/reset")
+async def paper_reset():
+    return paper_trading.reset_account()
 
 
 @app.get("/api/learning/weights")
