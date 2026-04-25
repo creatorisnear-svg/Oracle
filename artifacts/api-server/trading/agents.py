@@ -709,23 +709,23 @@ class JudgeAgent:
             disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_CALL"]
             conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_CALL"]))
             entry = price
-            stop = risk.get("stop_loss_long", price - 2 * atr)
-            target = risk.get("target_long", price + 3 * atr)
+            stop = round(price - 1.0 * atr, 2)
+            target = round(price + 1.5 * atr, 2)
         elif put_count >= self.THRESHOLD:
             signal = "BUY_PUT"
             agreed = [v["agent"] for v in votes if v["vote"] == "BUY_PUT"]
             disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_PUT"]
             conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_PUT"]))
             entry = price
-            stop = risk.get("stop_loss_short", price + 2 * atr)
-            target = risk.get("target_short", price - 3 * atr)
+            stop = round(price + 1.0 * atr, 2)
+            target = round(price - 1.5 * atr, 2)
         else:
             signal = "HOLD"
             agreed = []
             disagreed = []
             conf = float(np.mean([v["confidence"] for v in votes])) if votes else 50
             entry = price
-            stop = risk.get("stop_loss_long", price - 2 * atr)
+            stop = round(price - 1.0 * atr, 2)
             target = price
 
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
@@ -742,7 +742,7 @@ class JudgeAgent:
                 dt += timedelta(days=1)
                 if dt.weekday() < 5:  # Mon–Fri only
                     trading_days.append(int(dt.timestamp()))
-            max_move = min(atr * 1.2, abs(target - price))
+            max_move = min(atr * 0.6, abs(target - price))
             for i, ts in enumerate(trading_days):
                 progress = (i + 1) / 7
                 ease = progress * progress * (3 - 2 * progress)  # smooth S-curve

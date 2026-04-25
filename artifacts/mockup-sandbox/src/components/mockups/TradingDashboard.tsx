@@ -160,7 +160,7 @@ export default function TradingDashboard() {
   const [fearGreed, setFearGreed] = useState<FearGreed | null>(null);
   const [accuracy, setAccuracy] = useState<AccuracyReport | null>(null);
   const [fearLoading, setFearLoading] = useState(false);
-  const [indicators_visible, setIndicatorsVisible] = useState({ ema: true, bb: false, vwap: true, st: false });
+  const [indicators_visible, setIndicatorsVisible] = useState({ ema: true, bb: false, vwap: true, st: false, vol: true });
   const [chain, setChain] = useState<OptionsChain | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
   const [chainExpiry, setChainExpiry] = useState("");
@@ -260,7 +260,7 @@ export default function TradingDashboard() {
       }
 
       // Volume buy/sell histogram — green = buying pressure, red = selling pressure
-      if (data.volume?.length) {
+      if (indicators_visible.vol && data.volume?.length) {
         chart.priceScale('right').applyOptions({ scaleMarginTop: 0.05, scaleMarginBottom: 0.28 });
         const volSeries = chart.addSeries(HistogramSeries, {
           priceFormat: { type: 'volume' },
@@ -490,7 +490,7 @@ export default function TradingDashboard() {
               );
             })}
             <div className="w-px h-4 bg-slate-700 mx-1" />
-            {(["ema","bb","vwap","st"] as const).map(ind => (
+            {(["ema","bb","vwap","st","vol"] as const).map(ind => (
               <button key={ind} onClick={() => setIndicatorsVisible(v => ({ ...v, [ind]: !v[ind] }))}
                 className={`text-xs px-2.5 py-1 rounded font-semibold ${indicators_visible[ind] ? "bg-slate-600 text-white" : "text-slate-600 hover:text-slate-400"}`}
               >{ind.toUpperCase()}</button>
