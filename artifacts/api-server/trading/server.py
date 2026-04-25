@@ -24,7 +24,7 @@ import paper_trading
 from agents import (
     PriceActionAgent, TechnicalAgent, VolumeAgent,
     SentimentAgent, OptionsFlowAgent, MomentumAgent,
-    RiskAgent, FearGreedAgent, PoliticalAgent, JudgeAgent,
+    RiskAgent, FearGreedAgent, PoliticalAgent, MLAgent, JudgeAgent,
     HORIZONS, get_horizon_config, DEFAULT_HORIZON, compute_htf_trend,
 )
 from indicators import compute_all_indicators, safe_float
@@ -58,6 +58,7 @@ AGENTS = [
     PriceActionAgent(), TechnicalAgent(), VolumeAgent(),
     SentimentAgent(), OptionsFlowAgent(), MomentumAgent(),
     RiskAgent(), FearGreedAgent(), PoliticalAgent(),
+    MLAgent(),  # v6.7 — online-learning logistic-regression on 12 indicators
 ]
 JUDGE = JudgeAgent()
 
@@ -754,7 +755,23 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "4.0-9agents"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "6.7-10agents"}
+
+
+@app.get("/api/ml-stats")
+def ml_stats():
+    """Inspect the ML Agent's trained weight vector and meta-state."""
+    try:
+        weights = MLAgent._load()
+        meta = dict(MLAgent._weights_meta)
+        # Sort by absolute magnitude so the strongest predictors are obvious.
+        ordered = sorted(
+            [{"feature": k, "weight": round(float(v), 4)} for k, v in weights.items()],
+            key=lambda r: -abs(r["weight"]),
+        )
+        return {"meta": meta, "weights": ordered}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/api/live/{symbol}")

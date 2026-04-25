@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 import html as html_lib
 import logging
 import time
+from datetime import datetime, timezone
 from scipy.stats import norm
 
 from indicators import (
@@ -69,11 +70,12 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 5,
         "target_hit_bars": 24,      # 2 hours
         "stop_mult": 0.7, "tgt_mult": 0.9,
-        # Lowered from 6→5 because 6/9 produced a 100% HOLD rate in
-        # production (statistically rare for 9 agents to all agree on
-        # 5-minute noise). The stricter min_pillar_score=1.5 already
-        # provides the extra rigor for noisy intraday bars.
-        "threshold": 5,
+        # Threshold = 6/10 (60%). Bumped from 5/9 → 6/10 with the addition of
+        # the ML Agent (v6.7) so the consensus bar stays at ~60% — the
+        # stricter min_pillar_score=1.5 still provides extra rigor for
+        # noisy intraday bars. (Original 6/9 was too strict and produced
+        # 100% HOLD; 6/10 ≈ 5/9 in difficulty.)
+        "threshold": 6,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",  # confirm with hourly trend
         "expiry_pref": "0DTE / weekly",
@@ -85,9 +87,9 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 15,
         "target_hit_bars": 16,      # rest of day
         "stop_mult": 0.8, "tgt_mult": 1.1,
-        # Lowered from 6→5 — same reason as intraday. Pillar floor at 1.5
-        # plus the HTF tilt and conviction-dominance gates still filter.
-        "threshold": 5,
+        # 6/10 = 60% — same reason as intraday. Pillar floor at 1.5 plus
+        # the HTF tilt and conviction-dominance gates still filter.
+        "threshold": 6,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",
         "expiry_pref": "0DTE / weekly",
@@ -99,7 +101,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 60,
         "target_hit_bars": 30,
         "stop_mult": 1.0, "tgt_mult": 1.4,
-        "threshold": 5,             # 5/9 — HTF + conviction gates do the filtering
+        "threshold": 6,             # 6/10 — HTF + conviction gates do the filtering
         "min_pillar_score": 1.0,
         "htf_period": "6mo", "htf_interval": "1d",  # daily trend gate
         "expiry_pref": "weekly / 2-week",
@@ -111,7 +113,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 24 * 60,
         "target_hit_bars": 7,
         "stop_mult": 1.1, "tgt_mult": 1.3,
-        "threshold": 5,
+        "threshold": 6,
         "min_pillar_score": 1.0,
         "htf_period": "1y", "htf_interval": "1wk",  # weekly trend gate
         "expiry_pref": "2-week / monthly",
@@ -1260,6 +1262,292 @@ class PoliticalAgent:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 10. ML AGENT  ← NEW (online-learning logistic regression on 12 indicators)
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-contained ML agent with no third-party deps (no scikit-learn). Builds
+# a 12-dimensional feature vector from the current indicators, multiplies by
+# a learned weight vector, applies sigmoid → P(market goes up).
+#
+# Cold start: hand-tuned weights derived from short-term swing-trading
+# literature so the agent contributes useful signal from day one. Once the
+# learning loop has resolved >=5 real predictions, `train_from_resolved()`
+# replaces the cold-start weights with online-fit logistic regression
+# (SGD on log-loss, L2 regularised). Weights persist to ml_weights.json.
+#
+# IMPORTANT: every feature is constructed so that a positive value × positive
+# weight = bullish vote. This lets us read each weight as "how much does
+# this indicator predict UP moves on this dataset", which is what an ML
+# agent should answer.
+# ─────────────────────────────────────────────────────────────────────────────
+ML_WEIGHTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml_weights.json")
+
+ML_FEATURES_DEFAULT: dict[str, float] = {
+    # Negative bias offsets the small positive expectation embedded in trend
+    # features so the agent doesn't bias-pump CALL votes when features are zero.
+    "_bias":            -0.10,
+    # Mean-reversion: low RSI = bullish, high = bearish. Feature = (50-rsi)/30,
+    # so RSI 30 → +0.67 × +0.45 weight = +0.30 bullish contribution.
+    "rsi_signal":        0.45,
+    # MACD histogram momentum, ATR-normalised so it scales across symbols.
+    "macd_hist":         0.85,
+    # Discrete bullish/bearish MACD cross event.
+    "macd_cross":        0.60,
+    # ADX > 20 with +DI > -DI = strong up-trend; same with -DI > +DI = down.
+    "adx_directional":   0.70,
+    # SuperTrend direction is one of the most reliable swing-trade filters.
+    "supertrend_dir":    0.90,
+    # Ichimoku cloud bias (+1 bullish / -1 bearish / 0 neutral).
+    "ichimoku_signal":   0.55,
+    # Candlestick reversal pattern score (the v6.6 indicator).
+    "cs_pattern":        0.75,
+    # Bollinger position: at upper band = stretched → mean-reversion bearish,
+    # so weight is NEGATIVE (positive feature × negative weight = bearish).
+    "bb_position":      -0.40,
+    # Distance from VWAP, tanh-squashed. Extended above VWAP = bearish (mean-rev).
+    "vwap_distance":    -0.25,
+    # Trend score from compute_all_indicators (+1 up / 0 chop / -1 down).
+    "trend_score":       0.50,
+    # Williams %R: -20 = overbought (bearish), -80 = oversold (bullish).
+    # Feature = (-50-wr)/30, so wr=-80 → +1; with weight 0.30 = +0.30 bullish.
+    "williams_r":        0.30,
+    # Chaikin Money Flow > 0 = institutional accumulation = bullish.
+    "cmf":               0.40,
+}
+
+
+def _ml_pretty(k: str) -> str:
+    return {
+        "rsi_signal": "RSI", "macd_hist": "MACD-h", "macd_cross": "MACDx",
+        "adx_directional": "ADX", "supertrend_dir": "ST", "ichimoku_signal": "Ichi",
+        "cs_pattern": "Patterns", "bb_position": "BB", "vwap_distance": "VWAP",
+        "trend_score": "Trend", "williams_r": "W%R", "cmf": "CMF",
+    }.get(k, k)
+
+
+class MLAgent:
+    name = "ML Agent"
+    emoji = "🤖"
+    method = "Logistic regression on 12 indicators (online learning from resolved predictions)"
+
+    # Class-level cache so we don't re-read ml_weights.json on every call.
+    _weights_cache: dict | None = None
+    _weights_meta: dict = {"trained": False, "samples": 0, "loss": None, "version": 0}
+
+    @classmethod
+    def _load(cls) -> dict:
+        """Load weights from disk (lazy, cached). Falls back to defaults on miss."""
+        if cls._weights_cache is not None:
+            return cls._weights_cache
+        try:
+            if os.path.exists(ML_WEIGHTS_FILE):
+                with open(ML_WEIGHTS_FILE) as fh:
+                    data = json.load(fh)
+                w = dict(ML_FEATURES_DEFAULT)
+                # Only accept keys we know about — guards against corrupted files
+                # silently injecting nonsense features.
+                for k, v in (data.get("weights") or {}).items():
+                    if k in w:
+                        try:
+                            w[k] = float(v)
+                        except (TypeError, ValueError):
+                            pass
+                cls._weights_cache = w
+                cls._weights_meta = data.get("meta") or cls._weights_meta
+                return w
+        except Exception as e:
+            logger.warning(f"MLAgent._load failed, using defaults: {e}")
+        cls._weights_cache = dict(ML_FEATURES_DEFAULT)
+        return cls._weights_cache
+
+    @classmethod
+    def _save(cls):
+        try:
+            with open(ML_WEIGHTS_FILE, "w") as fh:
+                json.dump({"weights": cls._weights_cache, "meta": cls._weights_meta},
+                          fh, indent=2)
+        except Exception as e:
+            logger.warning(f"MLAgent._save failed: {e}")
+
+    @staticmethod
+    def _extract(ind: dict) -> dict:
+        """Build the 12-feature vector from an indicators dict (live or snapshot).
+
+        Tolerant to missing keys — uses neutral defaults so old DB snapshots
+        (which may not contain v6.6 fields like cs_pattern_score) don't crash
+        training. Each feature is normalised so the weight vector is symbol-
+        and price-independent.
+        """
+        try:
+            price = float(ind.get("price") or 0) or 1.0
+            atr = float(ind.get("atr14") or max(price * 0.02, 1e-6)) or 1e-6
+            rsi = float(ind.get("rsi14") or 50)
+            macd_h = float(ind.get("macd_hist") or 0)
+            macd_up = bool(ind.get("macd_cross_up"))
+            macd_dn = bool(ind.get("macd_cross_dn"))
+            adx = float(ind.get("adx") or 20)
+            plus_di = float(ind.get("plus_di") or 20)
+            minus_di = float(ind.get("minus_di") or 20)
+            st_dir = str(ind.get("supertrend_dir") or "").lower()
+            ich_sig = str(ind.get("ichimoku_signal") or "neutral").lower()
+            cs_score = float(ind.get("cs_pattern_score") or 0)
+            bb_u = float(ind.get("bb_upper") or price * 1.05)
+            bb_l = float(ind.get("bb_lower") or price * 0.95)
+            bb_m = float(ind.get("bb_mid") or price)
+            vwap_pct = float(ind.get("price_vs_vwap_pct") or 0)
+            trend_s = float(ind.get("trend_score") or 0)
+            wr = float(ind.get("williams_r") or -50)
+            cmf = float(ind.get("cmf") or 0)
+            bb_half = max((bb_u - bb_l) / 2.0, 1e-6)
+            return {
+                "_bias":            1.0,
+                "rsi_signal":       (50.0 - rsi) / 30.0,
+                "macd_hist":        math.tanh(macd_h / atr),
+                "macd_cross":       (1.0 if macd_up else 0.0) - (1.0 if macd_dn else 0.0),
+                "adx_directional":  math.tanh((adx - 20.0) / 15.0) * (1.0 if plus_di > minus_di else -1.0),
+                "supertrend_dir":   1.0 if st_dir == "up" else (-1.0 if st_dir == "down" else 0.0),
+                "ichimoku_signal":  1.0 if ich_sig == "bullish" else (-1.0 if ich_sig == "bearish" else 0.0),
+                "cs_pattern":       math.tanh(cs_score / 1.5),
+                "bb_position":      max(-2.5, min(2.5, (price - bb_m) / bb_half)),
+                "vwap_distance":    math.tanh(vwap_pct / 5.0),
+                "trend_score":      max(-1.0, min(1.0, trend_s)),
+                "williams_r":       (-50.0 - wr) / 30.0,
+                "cmf":              math.tanh(cmf * 10.0),
+            }
+        except Exception:
+            return {k: 0.0 for k in ML_FEATURES_DEFAULT}
+
+    @classmethod
+    def _logit(cls, features: dict) -> float:
+        w = cls._load()
+        return sum(features.get(k, 0.0) * w.get(k, 0.0) for k in w)
+
+    @staticmethod
+    def _sigmoid(z: float) -> float:
+        if z > 50: return 1.0
+        if z < -50: return 0.0
+        return 1.0 / (1.0 + math.exp(-z))
+
+    def analyze(self, df, ind):
+        try:
+            f = self._extract(ind)
+            z = self._logit(f)
+            p_bull = self._sigmoid(z)
+
+            # Top-3 strongest contributors for human-readable reason.
+            w = self._load()
+            contribs = []
+            for k, v in f.items():
+                if k == "_bias":
+                    continue
+                c = v * w.get(k, 0.0)
+                if abs(c) >= 0.05:
+                    contribs.append((k, c))
+            contribs.sort(key=lambda x: -abs(x[1]))
+            top_str = ", ".join(
+                f"{_ml_pretty(k)} {('↑' if c > 0 else '↓')}{abs(c):.2f}"
+                for k, c in contribs[:3]
+            ) or "no strong features"
+
+            samples = int(self._weights_meta.get("samples") or 0)
+            train_tag = f"trained n={samples}" if samples >= 10 else "cold-start"
+
+            # Vote thresholds: be more cautious during cold-start so we don't
+            # contribute high-confidence votes from un-validated weights.
+            hi, lo = (0.62, 0.38) if samples >= 10 else (0.66, 0.34)
+
+            if p_bull >= hi:
+                conf = round(50 + (p_bull - 0.5) * 80, 1)
+                return _vote(self.name, self.emoji, "BUY_CALL", conf,
+                             f"P(↑)={p_bull:.0%} ({train_tag}) | drivers: {top_str}")
+            if p_bull <= lo:
+                conf = round(50 + (0.5 - p_bull) * 80, 1)
+                return _vote(self.name, self.emoji, "BUY_PUT", conf,
+                             f"P(↑)={p_bull:.0%} ({train_tag}) | drivers: {top_str}")
+            return _hold(self.name, self.emoji,
+                         f"P(↑)={p_bull:.0%} — no edge ({train_tag})")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"ML error: {e}")
+
+    @classmethod
+    def train_from_resolved(cls, conn, lr: float = 0.05, epochs: int = 5,
+                            l2: float = 0.001) -> dict:
+        """Train weights from resolved predictions in predictions.db.
+
+        Joins predictions with their indicator_snapshots, builds (features,
+        label) pairs where label = 1 if the market actually went UP
+        (CALL+correct OR PUT+wrong), 0 otherwise. Skips HOLD predictions
+        because they encode no directional ground-truth. Runs SGD with L2.
+
+        Returns {"samples": n, "loss": final_loss, "trained": bool}.
+        """
+        try:
+            cur = conn.execute("""
+                SELECT p.id, p.signal, p.was_correct, s.snapshot_json
+                FROM predictions p
+                JOIN indicator_snapshots s ON s.prediction_id = p.id
+                WHERE p.outcome IS NOT NULL
+                  AND p.was_correct IS NOT NULL
+                  AND p.signal IN ('BUY_CALL','BUY_PUT')
+            """)
+            rows = cur.fetchall()
+            samples: list[tuple[dict, float]] = []
+            for r in rows:
+                try:
+                    raw = r["snapshot_json"] if hasattr(r, "keys") else r[3]
+                    snap = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                    f = cls._extract(snap)
+                    sig = r["signal"] if hasattr(r, "keys") else r[1]
+                    correct = int(r["was_correct"] if hasattr(r, "keys") else r[2])
+                    if sig == "BUY_CALL":
+                        y = 1.0 if correct == 1 else 0.0
+                    else:  # BUY_PUT
+                        y = 0.0 if correct == 1 else 1.0
+                    samples.append((f, y))
+                except Exception:
+                    continue
+
+            n = len(samples)
+            cls._weights_meta = {**cls._weights_meta, "samples": n}
+
+            if n < 5:
+                cls._save()
+                return {"samples": n, "loss": None, "trained": False}
+
+            w = dict(cls._load())
+            keys = list(w.keys())
+            import random
+            losses: list[float] = []
+            for _ in range(epochs):
+                random.shuffle(samples)
+                tot_loss = 0.0
+                for f, y in samples:
+                    z = sum(f.get(k, 0.0) * w[k] for k in keys)
+                    p = cls._sigmoid(z)
+                    err = p - y
+                    tot_loss += -(y * math.log(max(p, 1e-9)) + (1.0 - y) * math.log(max(1.0 - p, 1e-9)))
+                    for k in keys:
+                        # L2 doesn't apply to bias.
+                        reg = 0.0 if k == "_bias" else l2 * w[k]
+                        w[k] -= lr * (err * f.get(k, 0.0) + reg)
+                losses.append(tot_loss / n)
+
+            cls._weights_cache = w
+            cls._weights_meta = {
+                "trained": True,
+                "samples": n,
+                "loss": round(losses[-1], 4),
+                "version": int(cls._weights_meta.get("version") or 0) + 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            cls._save()
+            logger.info(f"MLAgent: trained on {n} resolved predictions, loss={losses[-1]:.4f}")
+            return {"samples": n, "loss": losses[-1], "trained": True}
+        except Exception as e:
+            logger.warning(f"MLAgent.train_from_resolved failed: {e}")
+            return {"samples": 0, "loss": None, "trained": False, "error": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TARGET-HIT PROBABILITY  (replaces the old "agent vote average" confidence)
 # ─────────────────────────────────────────────────────────────────────────────
 def compute_target_hit_probability(
@@ -1475,7 +1763,7 @@ def compute_target_hit_probability(
 class JudgeAgent:
     name = "Judge Agent"
     emoji = "⚖️"
-    THRESHOLD = 5  # out of 9 analysts (default — overridden by horizon config)
+    THRESHOLD = 6  # out of 10 analysts (default — overridden by horizon config)
 
     def decide(self, votes: list, ind: dict) -> dict:
         price = ind.get("price", 0)

@@ -114,6 +114,12 @@ SNAPSHOT_FEATURES = [
     "ichimoku_signal", "supertrend_dir",
     "rsi_divergence", "double_pattern", "triangle_pattern",
     "psar_trend", "aroon_osc",
+    # v6.7 — additional features required by MLAgent feature extractor
+    # so that train_from_resolved() can rebuild the same vector from
+    # a stored snapshot that the live analyze() call sees.
+    "price", "atr14", "macd_cross_up", "macd_cross_dn",
+    "plus_di", "minus_di", "bb_upper", "bb_lower", "bb_mid",
+    "price_vs_vwap_pct", "trend_score", "cs_pattern_score",
 ]
 
 

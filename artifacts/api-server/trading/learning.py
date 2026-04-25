@@ -468,6 +468,16 @@ def verify_outcomes(symbol: str | None = None,
         conn.commit()
         _recalculate_weights(c)
         conn.commit()
+        # v6.7 — let the ML Agent retrain on the freshly-resolved data so it
+        # incorporates the new ground-truth labels into its weight vector.
+        # Best-effort: failures here must never break the verification loop.
+        try:
+            from agents import MLAgent
+            stats = MLAgent.train_from_resolved(conn)
+            if stats.get("trained"):
+                logger.info(f"MLAgent retrained: n={stats['samples']}, loss={stats.get('loss')}")
+        except Exception as e:
+            logger.warning(f"MLAgent retrain skipped: {e}")
     conn.close()
     return {"resolved": resolved, "skipped": scanned - resolved, "scanned": scanned}
 

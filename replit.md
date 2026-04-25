@@ -1,4 +1,68 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.6
+# TradeSignal AI — 10-Agent Trading Prediction System v6.7
+
+## v6.7 — ML Agent (online-learning logistic regression)
+Added the **10th agent**: `MLAgent` in agents.py — a self-contained logistic-
+regression classifier that runs over a 12-dimensional feature vector built
+from the existing indicators. **Zero third-party dependencies** — no
+scikit-learn, just numpy/math. Files touched:
+`agents.py`, `server.py`, `learning.py`, `meta_learning.py`,
+`mockups/TradingDashboard.tsx`. New persistent file: `ml_weights.json`.
+
+**Features (all normalised so positive value × positive weight = bullish):**
+RSI mean-reversion, MACD histogram (ATR-normalised), MACD cross event,
+ADX × directional sign, SuperTrend direction, Ichimoku cloud bias,
+candlestick pattern score (the v6.6 indicator), Bollinger position,
+VWAP distance, multi-TF trend score, Williams %R, Chaikin Money Flow.
+
+**Cold start:** ships with hand-tuned weights derived from short-term
+swing-trading literature so the agent contributes useful signal from day
+one. SuperTrend direction (0.90) and MACD histogram (0.85) carry the most
+weight; mean-reversion features (BB position, VWAP distance) are negative
+weights so a stretched price = bearish vote.
+
+**Online learning:** every time `verify_outcomes` resolves predictions in
+the DB, it calls `MLAgent.train_from_resolved(conn)` which:
+1. Joins resolved predictions with their `indicator_snapshots` rows.
+2. Builds (features, label) pairs where label = 1 if the market actually
+   went UP (CALL+correct OR PUT+wrong).
+3. Runs SGD on log-loss with L2 regularisation (5 epochs, lr=0.05).
+4. Persists new weights to `ml_weights.json` (gitignored).
+5. Skips training if <5 resolved samples — keeps cold-start weights.
+
+**Cautious cold-start vote thresholds:** the agent requires P(up)≥66% to
+fire CALL until ≥10 samples have trained the weights, then loosens to
+≥62%. This prevents un-validated cold-start weights from pumping high-
+confidence votes into the consensus.
+
+**Required infrastructure changes:**
+- Bumped `JudgeAgent.THRESHOLD` from 5 → 6 across all four horizons in
+  HORIZONS dict so the consensus bar stays at ~60% (5/9 ≈ 56% → 6/10 = 60%).
+- Extended `SNAPSHOT_FEATURES` in `meta_learning.py` to include the
+  v6.6/v6.7 features the ML extractor needs (price, atr14, plus_di,
+  minus_di, bb_upper/lower/mid, macd_cross_up/dn, price_vs_vwap_pct,
+  trend_score, cs_pattern_score) so training can rebuild the same
+  feature vector from a stored snapshot.
+- Added `/api/ml-stats` endpoint to inspect the trained weight vector
+  + meta-state (samples, loss, version, last update).
+- Updated header text "9-AGENT" → "10-AGENT", empty-state text
+  "9 agents... 5 of 9" → "10 agents... 6 of 10", and consensus footers
+  "X/9" → "X/10" in `TradingDashboard.tsx`.
+- `/api/health` version now reads `6.7-10agents`.
+
+**Why a logistic-regression ML agent (and not a deep model)?**
+The base rate of resolved predictions in a single user's DB will be
+small (dozens to hundreds, not millions). Logistic regression generalises
+well at low n, doesn't overfit, and is fully interpretable — every weight
+is "how much does this indicator predict UP moves on YOUR data". The
+agent's vote always shows the top-3 driving features so the user can
+see why the ML voted the way it did.
+
+**NOT touched (intentionally):** the three backtest scripts in `tests/`
+still hard-code the original 9-agent list. They're historical-replay
+harnesses for the rule-based agents and adding ML there would conflate
+purposes. The production code is fully 10-agent.
+
+---
 
 ## v6.6 — Candlestick patterns + horizon-aware grading
 Three targeted improvements to accuracy + bug fixes:
