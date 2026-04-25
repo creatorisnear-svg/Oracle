@@ -403,6 +403,279 @@ def detect_head_shoulders(highs, lows, closes, lookback=40):
     return "none"
 
 
+# ─── NEW: Parabolic SAR ───────────────────────────────────────────────────────
+def compute_parabolic_sar(highs, lows, af_step=0.02, af_max=0.2):
+    """Parabolic SAR — trend-following stop-and-reverse system."""
+    n = len(highs)
+    if n < 3:
+        return {"sar": float(highs[-1] if n else 0), "trend": "neutral"}
+    sar = np.zeros(n)
+    trend = 1  # 1 = up, -1 = down
+    af = af_step
+    ep = highs[0]
+    sar[0] = lows[0]
+    for i in range(1, n):
+        prev = sar[i-1]
+        sar[i] = prev + af * (ep - prev)
+        if trend == 1:
+            sar[i] = min(sar[i], lows[i-1], lows[i-2] if i >= 2 else lows[i-1])
+            if lows[i] < sar[i]:
+                trend = -1
+                sar[i] = ep
+                ep = lows[i]
+                af = af_step
+            elif highs[i] > ep:
+                ep = highs[i]
+                af = min(af + af_step, af_max)
+        else:
+            sar[i] = max(sar[i], highs[i-1], highs[i-2] if i >= 2 else highs[i-1])
+            if highs[i] > sar[i]:
+                trend = 1
+                sar[i] = ep
+                ep = highs[i]
+                af = af_step
+            elif lows[i] < ep:
+                ep = lows[i]
+                af = min(af + af_step, af_max)
+    return {"sar": float(sar[-1]), "trend": "up" if trend == 1 else "down"}
+
+
+# ─── NEW: Aroon Oscillator ────────────────────────────────────────────────────
+def compute_aroon(highs, lows, period=14):
+    """Aroon Up/Down — measures time since highest high / lowest low."""
+    n = len(highs)
+    if n < period:
+        return {"up": 50.0, "down": 50.0, "osc": 0.0}
+    h_recent = highs[-period:]
+    l_recent = lows[-period:]
+    days_since_high = period - 1 - int(np.argmax(h_recent))
+    days_since_low = period - 1 - int(np.argmin(l_recent))
+    aroon_up = 100 * (period - days_since_high) / period
+    aroon_dn = 100 * (period - days_since_low) / period
+    return {"up": round(aroon_up, 1), "down": round(aroon_dn, 1),
+            "osc": round(aroon_up - aroon_dn, 1)}
+
+
+# ─── NEW: CCI (Commodity Channel Index) ───────────────────────────────────────
+def compute_cci(highs, lows, closes, period=20):
+    """CCI — overbought >100, oversold <-100."""
+    n = len(closes)
+    if n < period:
+        return 0.0
+    tp = (highs + lows + closes) / 3
+    sma = pd.Series(tp).rolling(period).mean().values
+    md = pd.Series(tp).rolling(period).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True).values
+    cci = (tp - sma) / (0.015 * md + 1e-9)
+    return float(cci[-1])
+
+
+# ─── NEW: MFI (Money Flow Index) — volume-weighted RSI ────────────────────────
+def compute_mfi(highs, lows, closes, volumes, period=14):
+    """MFI 0-100. >80 overbought, <20 oversold. Confirms RSI with volume."""
+    n = len(closes)
+    if n < period + 1:
+        return 50.0
+    tp = (highs + lows + closes) / 3
+    mf = tp * volumes
+    pos_mf = np.zeros(n)
+    neg_mf = np.zeros(n)
+    for i in range(1, n):
+        if tp[i] > tp[i-1]:
+            pos_mf[i] = mf[i]
+        elif tp[i] < tp[i-1]:
+            neg_mf[i] = mf[i]
+    pos_sum = np.sum(pos_mf[-period:])
+    neg_sum = np.sum(neg_mf[-period:])
+    if neg_sum == 0:
+        return 100.0
+    mr = pos_sum / neg_sum
+    return float(100 - (100 / (1 + mr)))
+
+
+# ─── NEW: CMF (Chaikin Money Flow) ────────────────────────────────────────────
+def compute_cmf(highs, lows, closes, volumes, period=20):
+    """CMF — money flow over period. Positive = accumulation, negative = distribution."""
+    n = len(closes)
+    if n < period:
+        return 0.0
+    rng = highs - lows
+    mf_mult = np.where(rng > 0, ((closes - lows) - (highs - closes)) / rng, 0)
+    mf_vol = mf_mult * volumes
+    cmf = np.sum(mf_vol[-period:]) / (np.sum(volumes[-period:]) + 1e-9)
+    return float(cmf)
+
+
+# ─── NEW: TSI (True Strength Index) ───────────────────────────────────────────
+def compute_tsi(closes, long_p=25, short_p=13):
+    """TSI — double-smoothed momentum oscillator."""
+    n = len(closes)
+    if n < long_p + short_p + 5:
+        return 0.0
+    delta = np.diff(closes, prepend=closes[0])
+    s = pd.Series(delta).ewm(span=long_p, adjust=False).mean()
+    s = s.ewm(span=short_p, adjust=False).mean()
+    a = pd.Series(np.abs(delta)).ewm(span=long_p, adjust=False).mean()
+    a = a.ewm(span=short_p, adjust=False).mean()
+    tsi = 100 * s / (a + 1e-9)
+    return float(tsi.values[-1])
+
+
+# ─── NEW: TRIX — triple-smoothed EMA momentum ─────────────────────────────────
+def compute_trix(closes, period=15):
+    n = len(closes)
+    if n < period * 3:
+        return 0.0
+    s = pd.Series(closes).ewm(span=period, adjust=False).mean()
+    s = s.ewm(span=period, adjust=False).mean()
+    s = s.ewm(span=period, adjust=False).mean()
+    trix = s.pct_change() * 100
+    return float(trix.values[-1])
+
+
+# ─── NEW: HMA (Hull Moving Average) — fast, low-lag MA ────────────────────────
+def compute_hma(closes, period=20):
+    n = len(closes)
+    if n < period * 2:
+        return float(closes[-1])
+    half = period // 2
+    sqrtp = int(np.sqrt(period))
+    wma1 = pd.Series(closes).rolling(half).apply(
+        lambda x: np.dot(x, np.arange(1, half+1)) / (half*(half+1)/2), raw=True)
+    wma2 = pd.Series(closes).rolling(period).apply(
+        lambda x: np.dot(x, np.arange(1, period+1)) / (period*(period+1)/2), raw=True)
+    diff = (2 * wma1 - wma2)
+    hma = diff.rolling(sqrtp).apply(
+        lambda x: np.dot(x, np.arange(1, sqrtp+1)) / (sqrtp*(sqrtp+1)/2), raw=True)
+    return float(hma.values[-1]) if not np.isnan(hma.values[-1]) else float(closes[-1])
+
+
+# ─── NEW: Pure ROC (Rate of Change) ───────────────────────────────────────────
+def compute_roc(closes, period=10):
+    if len(closes) <= period:
+        return 0.0
+    return float((closes[-1] - closes[-period-1]) / closes[-period-1] * 100)
+
+
+# ─── NEW: Double Top / Double Bottom detection ────────────────────────────────
+def detect_double_pattern(highs, lows, closes, lookback=30, tol=0.025):
+    """Two peaks/troughs at similar level + break of valley/peak between them."""
+    n = len(closes)
+    if n < lookback:
+        return "none"
+    h, l, c = highs[-lookback:], lows[-lookback:], closes[-1]
+    peaks = [i for i in range(2, len(h)-2) if h[i] > h[i-1] and h[i] > h[i-2]
+             and h[i] > h[i+1] and h[i] > h[i+2]]
+    troughs = [i for i in range(2, len(l)-2) if l[i] < l[i-1] and l[i] < l[i-2]
+               and l[i] < l[i+1] and l[i] < l[i+2]]
+    # Double top
+    if len(peaks) >= 2:
+        p1, p2 = peaks[-2], peaks[-1]
+        if abs(h[p1] - h[p2]) / h[p1] < tol:
+            valley_lows = l[p1:p2+1]
+            if len(valley_lows) > 0:
+                valley = float(np.min(valley_lows))
+                if c < valley:
+                    return "double_top"
+    # Double bottom
+    if len(troughs) >= 2:
+        t1, t2 = troughs[-2], troughs[-1]
+        if abs(l[t1] - l[t2]) / l[t1] < tol:
+            peak_highs = h[t1:t2+1]
+            if len(peak_highs) > 0:
+                peak = float(np.max(peak_highs))
+                if c > peak:
+                    return "double_bottom"
+    return "none"
+
+
+# ─── NEW: Triangle pattern (ascending / descending) ───────────────────────────
+def detect_triangle(highs, lows, lookback=25):
+    """Ascending = flat highs + rising lows. Descending = flat lows + falling highs."""
+    n = len(highs)
+    if n < lookback:
+        return "none"
+    h = highs[-lookback:]
+    l = lows[-lookback:]
+    x = np.arange(lookback)
+    # linear regression slopes
+    slope_h = np.polyfit(x, h, 1)[0] / np.mean(h) * 100  # %/bar
+    slope_l = np.polyfit(x, l, 1)[0] / np.mean(l) * 100
+    if abs(slope_h) < 0.05 and slope_l > 0.10:
+        return "ascending"   # bullish
+    if abs(slope_l) < 0.05 and slope_h < -0.10:
+        return "descending"  # bearish
+    if slope_h < -0.05 and slope_l > 0.05:
+        return "symmetrical"  # neutral, breakout coming
+    return "none"
+
+
+# ─── NEW: Cup & Handle (simplified) ───────────────────────────────────────────
+def detect_cup_handle(closes, highs, lookback=60):
+    """Rounded U-shape (cup) followed by a small consolidation (handle), break on top."""
+    n = len(closes)
+    if n < lookback:
+        return "none"
+    seg = closes[-lookback:]
+    third = lookback // 3
+    left, mid, right = seg[:third], seg[third:2*third], seg[2*third:]
+    if len(left) == 0 or len(mid) == 0 or len(right) == 0:
+        return "none"
+    left_max = np.max(left); right_max = np.max(right)
+    mid_min = np.min(mid)
+    # Cup: similar highs on left and right, dip in middle (≥ 8% drawdown)
+    cup = (abs(left_max - right_max) / left_max < 0.04 and
+           (left_max - mid_min) / left_max > 0.08)
+    if not cup:
+        return "none"
+    # Handle: small pullback in last 5-10 bars then break above cup rim
+    rim = max(left_max, right_max)
+    if closes[-1] > rim and np.min(seg[-10:]) > rim * 0.97:
+        return "cup_handle"
+    return "none"
+
+
+# ─── NEW: Kalman 1-D smoother on price ────────────────────────────────────────
+def kalman_smoothed_trend(closes, process_var=1e-4, meas_var=1e-2):
+    """Returns the latest Kalman-smoothed price + slope (denoised trend)."""
+    n = len(closes)
+    if n < 5:
+        return {"smoothed": float(closes[-1]), "slope_pct": 0.0}
+    x = float(closes[0])
+    p = 1.0
+    history = [x]
+    for z in closes[1:]:
+        # predict
+        p = p + process_var
+        # update
+        k = p / (p + meas_var)
+        x = x + k * (float(z) - x)
+        p = (1 - k) * p
+        history.append(x)
+    last = history[-1]
+    prev = history[-min(10, len(history))]
+    slope_pct = (last - prev) / prev * 100 if prev else 0.0
+    return {"smoothed": float(last), "slope_pct": float(slope_pct)}
+
+
+# ─── NEW: Monte Carlo target-hit probability (simple GBM) ─────────────────────
+def monte_carlo_target_prob(price, target, vol_pct, days=7, n_sims=2000):
+    """Probability of price touching `target` within `days` trading days using GBM."""
+    if price <= 0 or vol_pct <= 0 or days <= 0:
+        return 0.5
+    sigma_d = (vol_pct / 100) / np.sqrt(252)  # daily vol
+    direction_up = target > price
+    hits = 0
+    rng = np.random.default_rng(42)
+    for _ in range(n_sims):
+        p = price
+        for _ in range(days):
+            p *= np.exp(rng.normal(0, sigma_d))
+            if (direction_up and p >= target) or (not direction_up and p <= target):
+                hits += 1
+                break
+    return float(hits / n_sims)
+
+
 # ─── Composite Indicator Bundle ────────────────────────────────────────────────
 def compute_all_indicators(df: pd.DataFrame) -> dict:
     closes = df["Close"].values.astype(float)
@@ -432,6 +705,20 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
     donchian = compute_donchian(highs, lows, closes)
     keltner = compute_keltner(closes, atr)
     head_shoulders = detect_head_shoulders(highs, lows, closes)
+    psar = compute_parabolic_sar(highs, lows)
+    aroon = compute_aroon(highs, lows)
+    cci_val = compute_cci(highs, lows, closes)
+    mfi_val = compute_mfi(highs, lows, closes, volumes)
+    cmf_val = compute_cmf(highs, lows, closes, volumes)
+    tsi_val = compute_tsi(closes)
+    trix_val = compute_trix(closes)
+    hma_val = compute_hma(closes)
+    roc10 = compute_roc(closes, 10)
+    roc20 = compute_roc(closes, 20)
+    double_pat = detect_double_pattern(highs, lows, closes)
+    triangle_pat = detect_triangle(highs, lows)
+    cup_handle_pat = detect_cup_handle(closes, highs)
+    kalman = kalman_smoothed_trend(closes)
 
     # Volume stats
     avg_vol_20 = np.mean(volumes[-20:]) if n >= 20 else np.mean(volumes) if n > 0 else 1
@@ -551,6 +838,20 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "donchian": donchian,
         "keltner": keltner,
         "head_shoulders": head_shoulders,
+        "psar": psar,
+        "aroon": aroon,
+        "cci": safe_float(cci_val),
+        "mfi": safe_float(mfi_val),
+        "cmf": safe_float(cmf_val),
+        "tsi": safe_float(tsi_val),
+        "trix": safe_float(trix_val),
+        "hma20": safe_float(hma_val),
+        "roc10": safe_float(roc10),
+        "roc20": safe_float(roc20),
+        "double_pattern": double_pat,
+        "triangle_pattern": triangle_pat,
+        "cup_handle": cup_handle_pat,
+        "kalman_trend": kalman,
     }
 
 

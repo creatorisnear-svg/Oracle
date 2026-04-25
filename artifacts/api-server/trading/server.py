@@ -201,6 +201,213 @@ def _spy_trend() -> dict:
     return result
 
 
+def _macro_basket() -> dict:
+    """Fetch DXY, oil, 10y/2y yields, BTC, TLT (long bonds), gold. Cached 10 min.
+    Used by Judge to detect risk-on vs risk-off macro context."""
+    key = ("__MACRO__", "basket")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 600:
+        return cached[0]
+
+    def _trend(ticker: str, period: str = "1mo") -> dict:
+        try:
+            d = yf.Ticker(ticker).history(period=period, interval="1d")
+            if d.empty or len(d) < 5:
+                return {"value": 0.0, "change_5d": 0.0, "dir": "flat"}
+            closes = d["Close"].values
+            v = float(closes[-1])
+            prev = float(closes[-min(5, len(closes))])
+            chg = (v - prev) / prev * 100 if prev else 0.0
+            direction = "up" if chg > 0.5 else "down" if chg < -0.5 else "flat"
+            return {"value": round(v, 2), "change_5d": round(chg, 2), "dir": direction}
+        except Exception:
+            return {"value": 0.0, "change_5d": 0.0, "dir": "flat"}
+
+    try:
+        dxy = _trend("DX-Y.NYB")
+        oil = _trend("CL=F")
+        tnx = _trend("^TNX")          # 10-year yield
+        irx = _trend("^IRX")          # 13-week yield (proxy for short end)
+        btc = _trend("BTC-USD")
+        tlt = _trend("TLT")           # long-bond ETF
+        gold = _trend("GC=F")
+        # Yield-curve spread (10y - short)
+        curve_spread = round(tnx["value"] - irx["value"], 2)
+        # Risk-on score: oil up + BTC up + bonds down + DXY flat-ish = risk-on
+        risk_on_score = 0
+        risk_on_score += 1 if oil["dir"] == "up" else (-1 if oil["dir"] == "down" else 0)
+        risk_on_score += 1 if btc["dir"] == "up" else (-1 if btc["dir"] == "down" else 0)
+        risk_on_score += 1 if tlt["dir"] == "down" else (-1 if tlt["dir"] == "up" else 0)
+        risk_on_score += 1 if dxy["dir"] == "down" else (-1 if dxy["dir"] == "up" else 0)
+        # -4 .. +4 → label
+        if risk_on_score >= 2:
+            macro_label = "risk-on"
+        elif risk_on_score <= -2:
+            macro_label = "risk-off"
+        else:
+            macro_label = "mixed"
+        result = {
+            "dxy": dxy, "oil": oil, "tnx": tnx, "irx": irx,
+            "btc": btc, "tlt": tlt, "gold": gold,
+            "yield_curve_spread": curve_spread,
+            "yield_curve_inverted": curve_spread < 0,
+            "risk_on_score": risk_on_score,
+            "macro_label": macro_label,
+        }
+    except Exception as e:
+        result = {"macro_label": "unknown", "risk_on_score": 0,
+                  "yield_curve_spread": 0.0, "_error": str(e)}
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _sector_rotation() -> dict:
+    """5-day % change of the 11 SPDR sector ETFs. Tells you which sectors are leading.
+    Cached 10 min."""
+    key = ("__MACRO__", "sectors")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 600:
+        return cached[0]
+    sectors = {
+        "XLK": "Technology", "XLF": "Financials", "XLE": "Energy",
+        "XLV": "Healthcare", "XLY": "Consumer Discretionary",
+        "XLP": "Consumer Staples", "XLI": "Industrials",
+        "XLB": "Materials", "XLU": "Utilities",
+        "XLRE": "Real Estate", "XLC": "Communications",
+    }
+    out = []
+    for sym, name in sectors.items():
+        try:
+            d = yf.Ticker(sym).history(period="1mo", interval="1d")
+            if d.empty or len(d) < 6:
+                continue
+            closes = d["Close"].values
+            chg5 = (closes[-1] - closes[-6]) / closes[-6] * 100
+            out.append({"symbol": sym, "name": name, "change_5d": round(float(chg5), 2)})
+        except Exception:
+            continue
+    out.sort(key=lambda x: -x["change_5d"])
+    result = {
+        "leaders": out[:3],
+        "laggards": out[-3:],
+        "all": out,
+    }
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _fundamentals(sym: str) -> dict:
+    """Pull free fundamental ratios from yfinance. Cached 1 hour per symbol.
+    Returns P/E, P/B, ROE, debt/equity, dividend yield, short interest, FCF, etc."""
+    key = (sym, "fundamentals")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 3600:
+        return cached[0]
+    try:
+        info = yf.Ticker(sym).info or {}
+        # Score fundamentals 0-100 (higher = stronger company)
+        score = 50
+        pe = info.get("trailingPE")
+        fwd_pe = info.get("forwardPE")
+        pb = info.get("priceToBook")
+        peg = info.get("pegRatio")
+        roe = info.get("returnOnEquity")
+        d2e = info.get("debtToEquity")
+        rev_g = info.get("revenueGrowth")
+        eps_g = info.get("earningsGrowth")
+        fcf = info.get("freeCashflow")
+        div = info.get("dividendYield")
+        short_pct = info.get("shortPercentOfFloat")
+        rec_mean = info.get("recommendationMean")  # 1=strong buy, 5=strong sell
+
+        # Heuristic scoring (each criterion ±5)
+        if pe is not None:
+            if 8 < pe < 25: score += 5
+            elif pe > 50: score -= 8
+        if fwd_pe is not None and pe is not None and fwd_pe < pe:
+            score += 4   # earnings expected to grow
+        if pb is not None:
+            if pb < 3: score += 3
+            elif pb > 10: score -= 5
+        if peg is not None:
+            if 0 < peg < 1.2: score += 6
+            elif peg > 3: score -= 4
+        if roe is not None:
+            if roe > 0.15: score += 5
+            elif roe < 0: score -= 6
+        if d2e is not None:
+            if d2e < 80: score += 3
+            elif d2e > 200: score -= 5
+        if rev_g is not None:
+            if rev_g > 0.15: score += 5
+            elif rev_g < 0: score -= 5
+        if eps_g is not None:
+            if eps_g > 0.15: score += 5
+            elif eps_g < -0.10: score -= 6
+        if fcf is not None and fcf > 0:
+            score += 3
+        if rec_mean is not None:
+            if rec_mean < 2.0: score += 4
+            elif rec_mean > 3.5: score -= 4
+
+        score = max(0, min(100, score))
+        if score >= 70:
+            grade = "strong"
+        elif score >= 55:
+            grade = "good"
+        elif score >= 40:
+            grade = "neutral"
+        else:
+            grade = "weak"
+
+        result = {
+            "score": score, "grade": grade,
+            "pe": pe, "forward_pe": fwd_pe, "pb": pb, "peg": peg,
+            "roe": roe, "debt_equity": d2e,
+            "revenue_growth": rev_g, "earnings_growth": eps_g,
+            "free_cash_flow": fcf,
+            "dividend_yield": div,
+            "short_pct_float": short_pct,
+            "analyst_rec_mean": rec_mean,
+            "analyst_rec_label": (
+                "strong buy" if rec_mean and rec_mean < 1.5
+                else "buy" if rec_mean and rec_mean < 2.5
+                else "hold" if rec_mean and rec_mean < 3.5
+                else "sell" if rec_mean else "n/a"
+            ),
+        }
+    except Exception as e:
+        result = {"score": 50, "grade": "unknown", "_error": str(e)}
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _short_squeeze_score(sym: str, ind: dict) -> dict:
+    """Estimate short-squeeze risk: high short interest + low float + price compression
+    near recent highs = squeeze fuel."""
+    try:
+        info = yf.Ticker(sym).info or {}
+        short_pct = float(info.get("shortPercentOfFloat") or 0) * 100
+        days_to_cover = float(info.get("shortRatio") or 0)
+        bb_w = float(ind.get("bb_width_pct") or 5)
+        rsi = float(ind.get("rsi14") or 50)
+        # Score 0-100
+        score = 0
+        if short_pct > 20: score += 40
+        elif short_pct > 10: score += 25
+        elif short_pct > 5: score += 10
+        if days_to_cover > 5: score += 25
+        elif days_to_cover > 3: score += 15
+        if bb_w < 4: score += 20  # compression
+        if rsi > 60: score += 15  # already turning up
+        return {"score": min(score, 100),
+                "short_pct_float": short_pct,
+                "days_to_cover": days_to_cover,
+                "label": "high" if score >= 60 else "moderate" if score >= 35 else "low"}
+    except Exception:
+        return {"score": 0, "label": "unknown"}
+
+
 def _market_regime() -> dict:
     """Classify the broad market into bull / bear / sideways / risk-off.
     Uses SPY 50/200 EMA cross + VIX level. Cached 5 min."""
@@ -246,6 +453,10 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict):
     # Skip the SPY-vs-SPY tautology when analysing SPY itself
     ind["spy_trend"] = {"dir": "self", "pct_from_ema50": 0.0, "change_1d": 0.0} if sym == "SPY" else _spy_trend()
     ind["market_regime"] = _market_regime()
+    ind["macro_basket"] = _macro_basket()
+    ind["sector_rotation"] = _sector_rotation()
+    ind["fundamentals"] = _fundamentals(sym)
+    ind["short_squeeze"] = _short_squeeze_score(sym, ind)
     weights = LEARNING.get_weights()
     votes = []
     for agent in AGENTS:

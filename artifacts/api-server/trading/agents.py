@@ -210,6 +210,47 @@ class PriceActionAgent:
                         elif c < o and uw > 0.3:  # bearish rejection at fib
                             signals.append("BUY_PUT"); reasons.append(f"Fib reject ${near_fib:.2f}")
 
+            # NEW: Parabolic SAR
+            psar = ind.get("psar") or {}
+            if psar.get("trend") == "up":
+                signals.append("BUY_CALL"); reasons.append("PSAR flipped bullish")
+            elif psar.get("trend") == "down":
+                signals.append("BUY_PUT"); reasons.append("PSAR flipped bearish")
+
+            # NEW: Aroon
+            aroon = ind.get("aroon") or {}
+            aoz = float(aroon.get("osc") or 0)
+            if aoz > 50:
+                signals.append("BUY_CALL"); reasons.append(f"Aroon osc +{aoz:.0f}")
+            elif aoz < -50:
+                signals.append("BUY_PUT"); reasons.append(f"Aroon osc {aoz:.0f}")
+
+            # NEW: Double top / bottom
+            dpat = ind.get("double_pattern", "none")
+            if dpat == "double_bottom":
+                signals.append("BUY_CALL"); reasons.append("Double bottom break")
+            elif dpat == "double_top":
+                signals.append("BUY_PUT"); reasons.append("Double top break")
+
+            # NEW: Triangle pattern
+            tpat = ind.get("triangle_pattern", "none")
+            if tpat == "ascending":
+                signals.append("BUY_CALL"); reasons.append("Ascending triangle")
+            elif tpat == "descending":
+                signals.append("BUY_PUT"); reasons.append("Descending triangle")
+
+            # NEW: Cup & Handle breakout
+            if ind.get("cup_handle") == "cup_handle":
+                signals.append("BUY_CALL"); reasons.append("Cup & handle break")
+
+            # NEW: Kalman-smoothed trend slope
+            kalman = ind.get("kalman_trend") or {}
+            kslope = float(kalman.get("slope_pct") or 0)
+            if kslope > 1.5:
+                signals.append("BUY_CALL"); reasons.append(f"Kalman trend +{kslope:.1f}%")
+            elif kslope < -1.5:
+                signals.append("BUY_PUT"); reasons.append(f"Kalman trend {kslope:.1f}%")
+
             # NEW: Relative strength vs SPY
             # If this stock outperformed SPY by >0.6% today → bullish RS,
             # underperformed by >0.6% → bearish RS. Strong directional edge
@@ -244,12 +285,12 @@ class PriceActionAgent:
 class TechnicalAgent:
     name = "Technical Agent"
     emoji = "📈"
-    method = "RSI + MACD + Bollinger + SuperTrend + Stochastic + ADX + Williams %R + Ichimoku"
+    method = "RSI + MACD + Bollinger + SuperTrend + Stochastic + ADX + W%R + Ichimoku + CCI + MFI + CMF + TSI + TRIX + Aroon + RSI-divergence"
 
     def analyze(self, df, ind):
         try:
             result = score_indicators_to_direction(ind)
-            direction = result["direction"]
+            base_direction = result["direction"]
             conf = result["confidence"]
             score = result["score"]
 
@@ -258,10 +299,60 @@ class TechnicalAgent:
             wr = ind.get("williams_r", -50)
             ichi = ind.get("ichimoku_signal", "neutral")
             div = ind.get("rsi_divergence", "none")
+            cci = float(ind.get("cci") or 0)
+            mfi = float(ind.get("mfi") or 50)
+            cmf = float(ind.get("cmf") or 0)
+            tsi = float(ind.get("tsi") or 0)
+            trix = float(ind.get("trix") or 0)
+            roc10 = float(ind.get("roc10") or 0)
+            aroon = ind.get("aroon") or {"osc": 0}
+            aoz = float(aroon.get("osc") or 0)
+            hma = float(ind.get("hma20") or 0)
+            price = float(ind.get("price") or 0)
+
+            # Tally bull vs bear evidence from the EXTRA oscillators (each ±1)
+            extra_bull = 0
+            extra_bear = 0
+            extra_reasons = []
+
+            if cci > 100: extra_bull += 1; extra_reasons.append(f"CCI {cci:.0f}")
+            elif cci < -100: extra_bear += 1; extra_reasons.append(f"CCI {cci:.0f}")
+            if mfi > 65: extra_bull += 1; extra_reasons.append(f"MFI {mfi:.0f}")
+            elif mfi < 35: extra_bear += 1; extra_reasons.append(f"MFI {mfi:.0f}")
+            if cmf > 0.05: extra_bull += 1; extra_reasons.append(f"CMF +{cmf:.2f}")
+            elif cmf < -0.05: extra_bear += 1; extra_reasons.append(f"CMF {cmf:.2f}")
+            if tsi > 10: extra_bull += 1
+            elif tsi < -10: extra_bear += 1
+            if trix > 0.05: extra_bull += 1
+            elif trix < -0.05: extra_bear += 1
+            if roc10 > 2: extra_bull += 1
+            elif roc10 < -2: extra_bear += 1
+            if aoz > 30: extra_bull += 1
+            elif aoz < -30: extra_bear += 1
+            if hma > 0 and price > hma * 1.005: extra_bull += 1
+            elif hma > 0 and price < hma * 0.995: extra_bear += 1
+            if div == "bullish": extra_bull += 2; extra_reasons.append("RSI bull-div")
+            elif div == "bearish": extra_bear += 2; extra_reasons.append("RSI bear-div")
+
+            # Decide direction with the extras as tiebreaker / amplifier
+            if extra_bull - extra_bear >= 4 and base_direction != "BEARISH":
+                direction = "BULLISH"
+                conf = max(conf, 60.0) + min(extra_bull * 2, 12)
+            elif extra_bear - extra_bull >= 4 and base_direction != "BULLISH":
+                direction = "BEARISH"
+                conf = max(conf, 60.0) + min(extra_bear * 2, 12)
+            else:
+                direction = base_direction
+                # extras align with base → small boost; conflict → small fade
+                if direction == "BULLISH":
+                    conf += (extra_bull - extra_bear) * 1.5
+                elif direction == "BEARISH":
+                    conf += (extra_bear - extra_bull) * 1.5
 
             reasons = [
                 f"Score {score:+.1f}/12 | ADX {adx:.0f}({'TREND' if adx>25 else 'CHOP'})",
                 f"RSI {rsi:.0f} | W%R {wr:.0f} | Ichimoku {ichi}",
+                f"Extras bull/bear: {extra_bull}/{extra_bear}" + (f" ({', '.join(extra_reasons[:3])})" if extra_reasons else ""),
                 f"Divergence: {div}" if div != "none" else f"MACD hist {ind.get('macd_hist',0):+.4f}",
             ]
 
@@ -269,6 +360,8 @@ class TechnicalAgent:
             if adx < 15 and direction != "NEUTRAL":
                 conf *= 0.75
                 reasons[0] += " [LOW ADX — caution]"
+
+            conf = max(40.0, min(95.0, conf))
 
             if direction == "BULLISH":
                 return _vote(self.name, self.emoji, "BUY_CALL", conf, " | ".join(reasons))
@@ -1300,6 +1393,52 @@ class JudgeAgent:
             elif regime_label == "bull":
                 conf *= 0.90
 
+        # ── Fundamentals modifier ───────────────────────────────────
+        # Long calls on weak companies and long puts on strong companies
+        # are statistically poor bets. Score 0-100, ±8% conf.
+        fund = ind.get("fundamentals") or {}
+        fund_score = float(fund.get("score") or 50)
+        if signal == "BUY_CALL":
+            if fund_score >= 70:
+                conf *= 1.06           # strong company + bullish setup
+            elif fund_score < 40:
+                conf *= 0.92           # weak company + bullish setup = caution
+        elif signal == "BUY_PUT":
+            if fund_score < 40:
+                conf *= 1.06           # weak company + bearish setup = strong
+            elif fund_score >= 70:
+                conf *= 0.92           # strong company + bearish setup = caution
+
+        # ── Macro basket (DXY + oil + bonds + BTC) ─────────────────
+        # Risk-on macro favours CALLs; risk-off favours PUTs.
+        macro = ind.get("macro_basket") or {}
+        macro_label = macro.get("macro_label", "mixed")
+        if signal == "BUY_CALL" and macro_label == "risk-on":
+            conf *= 1.03
+        elif signal == "BUY_CALL" and macro_label == "risk-off":
+            conf *= 0.93
+        elif signal == "BUY_PUT" and macro_label == "risk-off":
+            conf *= 1.03
+        elif signal == "BUY_PUT" and macro_label == "risk-on":
+            conf *= 0.93
+
+        # Yield-curve inversion = recession warning, mild bias toward PUTs
+        if macro.get("yield_curve_inverted"):
+            if signal == "BUY_PUT":
+                conf *= 1.02
+            elif signal == "BUY_CALL":
+                conf *= 0.97
+
+        # ── Short-squeeze score — fuel for sharp upside on PUTs (caution) ──
+        squeeze = ind.get("short_squeeze") or {}
+        squeeze_score = float(squeeze.get("score") or 0)
+        if signal == "BUY_PUT" and squeeze_score >= 60:
+            # High short interest stocks can rip higher unexpectedly — risky to short
+            conf *= 0.88
+        elif signal == "BUY_CALL" and squeeze_score >= 60:
+            # Squeeze fuel adds upside — small boost
+            conf *= 1.04
+
         conf = max(40.0, min(95.0, conf))
 
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
@@ -1417,6 +1556,10 @@ class JudgeAgent:
                 "weekly_trend": weekly,
                 "spy_trend": spy,
                 "regime": regime,
+                "macro_basket": macro,
+                "sector_rotation": ind.get("sector_rotation"),
+                "fundamentals": fund,
+                "short_squeeze": squeeze,
             },
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],
