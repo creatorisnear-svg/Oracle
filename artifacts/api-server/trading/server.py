@@ -60,6 +60,22 @@ AGENTS = [
     RiskAgent(), FearGreedAgent(), PoliticalAgent(),
 ]
 JUDGE = JudgeAgent()
+
+# IMPORTANT: restore_if_missing() must run BEFORE LearningSystem() so that
+# init_db() finds an already-restored predictions.db. Otherwise init_db
+# creates a fresh empty schema and the next backup overwrites the user's
+# only good copy with that empty file.
+try:
+    import learning_backup
+    _restore_status = learning_backup.restore_if_missing()
+    if _restore_status.get("action") == "restored":
+        logger.info(
+            f"learning_backup: restored predictions.db from "
+            f"{_restore_status.get('from')} ({_restore_status.get('size_bytes')} bytes)"
+        )
+except Exception as _e:
+    logger.warning(f"learning_backup: restore-on-startup failed ({_e})")
+
 LEARNING = LearningSystem()
 
 # Meta-learning: indicator-snapshot logging, per-regime weighting,
@@ -681,6 +697,15 @@ async def lifespan(app: FastAPI):
     # Background learning-loop closer — resolves matured predictions every 5min
     asyncio.create_task(_periodic_outcome_verifier())
     logger.info("learning: outcome-verifier background loop scheduled")
+    # Periodic backups of predictions.db so an accidental delete or corrupt
+    # write doesn't wipe accumulated learning. Restore-on-startup already ran
+    # in __main__ before init_db() so by the time we get here the DB is whole.
+    try:
+        import learning_backup
+        learning_backup.start_backup_loop()
+        logger.info("learning_backup: snapshot loop scheduled")
+    except Exception as e:
+        logger.warning(f"learning_backup: failed to start ({e})")
     # Auto-refresh track_record.json + regime_stats.json on startup if stale,
     # then every 24h. Files are local-only (gitignored) so they survive git pulls.
     try:
@@ -930,6 +955,33 @@ def options_chain(symbol: str, expiry: str = ""):
     except Exception as e:
         logger.error(f"Options chain error {sym}: {e}")
         return {"error": str(e), "symbol": sym}
+
+
+@app.get("/api/learning-status")
+def learning_status():
+    """Snapshot of the AI's learning state — DB row counts, per-agent
+    accumulation, last backup time, file sizes. Powers the dashboard's
+    'AI Learning' indicator so the user can SEE that learning is happening
+    and that their data is being backed up."""
+    try:
+        import learning_backup
+        return {"status": "ok", **learning_backup.get_status()}
+    except Exception as e:
+        logger.error(f"learning_status error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@app.post("/api/learning-backup")
+def learning_backup_now():
+    """Manually trigger a snapshot of predictions.db. Returns the new
+    backup filename and the rotation count. Useful before a risky local
+    operation (git reset, clean clone, etc.)."""
+    try:
+        import learning_backup
+        return {"status": "ok", **learning_backup.backup_now()}
+    except Exception as e:
+        logger.error(f"learning_backup_now error: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 @app.get("/api/accuracy")

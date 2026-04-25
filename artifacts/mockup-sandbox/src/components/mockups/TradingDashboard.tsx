@@ -107,6 +107,27 @@ interface AccuracyReport {
   overall_win_rate?: number; total_predictions?: number;
   correct_predictions?: number; agents?: AccuracyAgent[];
 }
+interface LearningStatus {
+  status?: string;
+  db_path?: string;
+  db_exists?: boolean;
+  db_size_bytes?: number;
+  db_modified_iso?: string | null;
+  predictions_total?: number;
+  predictions_resolved?: number;
+  predictions_pending?: number;
+  first_prediction_iso?: string | null;
+  last_prediction_iso?: string | null;
+  last_resolved_iso?: string | null;
+  agents?: { name: string; weight: number; total: number; correct: number; accuracy_pct: number | null }[];
+  backup_dir?: string;
+  backup_count?: number;
+  latest_backup?: string | null;
+  latest_backup_iso?: string | null;
+  latest_backup_size_bytes?: number;
+  is_learning?: boolean;
+  weights_adjusting?: boolean;
+}
 
 // ─── Signal Styling ─────────────────────────────────────────────────────────
 function signalStyle(v: Signal) {
@@ -299,6 +320,8 @@ export default function TradingDashboard() {
   const [fearGreed, setFearGreed] = useState<FearGreed | null>(null);
   const [stockSentiment, setStockSentiment] = useState<StockSentiment | null>(null);
   const [accuracy, setAccuracy] = useState<AccuracyReport | null>(null);
+  const [learning, setLearning] = useState<LearningStatus | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
   const [fearLoading, setFearLoading] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -625,6 +648,25 @@ export default function TradingDashboard() {
     } catch {}
   }, []);
 
+  // ── Load learning status (DB rows, backups, per-agent accumulation) ────
+  // This proves to the user that the AI is actually persisting what it learns
+  // and that their data is backed up against accidental file resets.
+  const loadLearning = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/learning-status`);
+      if (res.ok) { const d = await res.json(); setLearning(d); }
+    } catch {}
+  }, []);
+
+  const triggerBackup = useCallback(async () => {
+    setBackupBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/learning-backup`, { method: "POST" });
+      if (res.ok) await loadLearning();
+    } catch {}
+    setBackupBusy(false);
+  }, [loadLearning]);
+
   // ── Paper trading helpers ──────────────────────────────────────────────
   const showPaperToast = (msg: string) => {
     setPaperToast(msg);
@@ -697,6 +739,7 @@ export default function TradingDashboard() {
   useEffect(() => {
     loadFearGreed();
     loadAccuracy();
+    loadLearning();
     // Fetch the supported prediction horizons once
     (async () => {
       try {
@@ -710,7 +753,7 @@ export default function TradingDashboard() {
       } catch {}
     })();
     loadPaperData();
-    const iv = setInterval(() => { loadFearGreed(); loadAccuracy(); }, 120000);
+    const iv = setInterval(() => { loadFearGreed(); loadAccuracy(); loadLearning(); }, 120000);
     return () => clearInterval(iv);
   }, []);
 
@@ -1538,6 +1581,74 @@ export default function TradingDashboard() {
             {/* ── ACCURACY TAB ── */}
             {tab === "accuracy" && (
               <div className="space-y-3">
+                {/* Learning persistence panel — shows the user that the AI is
+                    accumulating data and that backups are protecting their
+                    learning against accidental file resets. */}
+                {learning && (
+                  <div className={`rounded-xl p-3 border space-y-2 ${
+                    learning.is_learning
+                      ? "bg-emerald-900/20 border-emerald-800/50"
+                      : "bg-slate-800/50 border-slate-700"
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-block w-2 h-2 rounded-full ${
+                          learning.is_learning ? "bg-emerald-400 animate-pulse" : "bg-slate-500"
+                        }`} />
+                        <span className="text-xs font-bold text-slate-200 uppercase tracking-wide">
+                          AI Learning {learning.is_learning ? "Active" : "Idle"}
+                        </span>
+                      </div>
+                      <button
+                        onClick={triggerBackup}
+                        disabled={backupBusy}
+                        className="text-[10px] px-2 py-0.5 rounded bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 border border-blue-700/50 disabled:opacity-50">
+                        {backupBusy ? "Saving…" : "Back up now"}
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      <div className="bg-slate-900/40 rounded p-1.5">
+                        <div className="text-[10px] text-slate-500 uppercase">Logged</div>
+                        <div className="text-base font-bold text-slate-100">{learning.predictions_total ?? 0}</div>
+                      </div>
+                      <div className="bg-slate-900/40 rounded p-1.5">
+                        <div className="text-[10px] text-slate-500 uppercase">Resolved</div>
+                        <div className="text-base font-bold text-emerald-400">{learning.predictions_resolved ?? 0}</div>
+                      </div>
+                      <div className="bg-slate-900/40 rounded p-1.5">
+                        <div className="text-[10px] text-slate-500 uppercase">Pending</div>
+                        <div className="text-base font-bold text-amber-400">{learning.predictions_pending ?? 0}</div>
+                      </div>
+                    </div>
+                    <div className="text-[10px] text-slate-500 leading-relaxed">
+                      <div>
+                        DB <span className="text-slate-300 font-mono">predictions.db</span> ({((learning.db_size_bytes ?? 0) / 1024).toFixed(0)} KB)
+                        {learning.weights_adjusting
+                          ? <span className="text-emerald-400"> · weights adjusting</span>
+                          : <span className="text-slate-500"> · weights frozen until first resolution</span>}
+                      </div>
+                      <div className="mt-0.5">
+                        Backups: <span className="text-slate-300">{learning.backup_count ?? 0}</span>
+                        {learning.latest_backup && (
+                          <span> · last <span className="text-slate-300 font-mono">{learning.latest_backup}</span></span>
+                        )}
+                      </div>
+                      {learning.latest_backup_iso && (
+                        <div className="mt-0.5 text-slate-600">
+                          Last snapshot: {new Date(learning.latest_backup_iso).toLocaleString()}
+                        </div>
+                      )}
+                    </div>
+                    {!learning.weights_adjusting && (learning.predictions_total ?? 0) > 0 && (
+                      <div className="text-[10px] text-amber-400/80 bg-amber-900/20 border border-amber-800/40 rounded p-1.5">
+                        Predictions are logged but none have hit their hold window yet.
+                        Check back after market close for swing/position trades, or within
+                        2-6 hours for intraday/day signals.
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="text-xs text-slate-500 font-semibold uppercase">AI Agent Accuracy Log</div>
                 {accuracy ? (
                   <>

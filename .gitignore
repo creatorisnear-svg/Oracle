@@ -59,3 +59,6 @@ artifacts/api-server/trading/predictions.db-shm
 artifacts/api-server/trading/track_record.json
 artifacts/api-server/trading/regime_stats.json
 artifacts/api-server/trading/discovered_strategies.json
+# Local-only DB snapshots (auto-rotated, last 14 kept). Survives `git pull`
+# and accidental deletes of predictions.db — see learning_backup.py.
+artifacts/api-server/trading/backups/
