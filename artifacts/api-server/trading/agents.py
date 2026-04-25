@@ -1065,6 +1065,7 @@ class JudgeAgent:
         # Need >=3 pillars aligned for full confidence, =2 trims confidence,
         # <2 means the agents are voting on flimsy evidence -> HOLD.
         evidence_reason = None
+        evidence_pillars: dict = {}
         if signal != "HOLD":
             ema9 = float(ind.get("ema9") or price)
             ema21 = float(ind.get("ema21") or price)
@@ -1093,6 +1094,15 @@ class JudgeAgent:
             pillars_aligned = sum([trend_ok, momo_ok, vol_ok, price_ok])
             pillar_names = ["trend", "momentum", "volume", "price"]
             agreed_pillars = [n for n, ok in zip(pillar_names, [trend_ok, momo_ok, vol_ok, price_ok]) if ok]
+
+            evidence_pillars = {
+                "trend": bool(trend_ok),
+                "momentum": bool(momo_ok),
+                "volume": bool(vol_ok),
+                "price": bool(price_ok),
+                "aligned": pillars_aligned,
+                "total": 4,
+            }
 
             if pillars_aligned < 2:
                 # Nothing backing it up — refuse to fire.
@@ -1227,6 +1237,7 @@ class JudgeAgent:
                              else f"⏳ Need {self.THRESHOLD}/{total_analysts}")))
             ),
             "evidence_reason": evidence_reason,
+            "evidence_pillars": evidence_pillars or None,
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],
             "expiry_hint": opts["expiry_hint"],

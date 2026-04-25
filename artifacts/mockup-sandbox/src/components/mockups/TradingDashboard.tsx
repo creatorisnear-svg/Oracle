@@ -37,6 +37,11 @@ interface Judgment {
   agreed_agents: string[]; disagreed_agents: string[];
   vote_tally: { BUY_CALL: number; BUY_PUT: number; HOLD: number };
   position_size_pct: number; judge_reason: string;
+  evidence_reason?: string | null;
+  evidence_pillars?: {
+    trend: boolean; momentum: boolean; volume: boolean; price: boolean;
+    aligned: number; total: number;
+  } | null;
   action: string; strike_hint: string; expiry_hint: string;
   expiry_weekly: string; expiry_biweekly: string; expiry_monthly: string;
   entry_trigger: string; risk_note: string;
@@ -848,6 +853,34 @@ export default function TradingDashboard() {
                         </div>
                       )}
                     </div>
+                    {judgment.evidence_pillars && (
+                      <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5">
+                        <div className="flex justify-between items-center text-xs">
+                          <span className="text-slate-500 font-semibold">EVIDENCE PILLARS</span>
+                          <span className={`font-mono font-bold ${
+                            judgment.evidence_pillars.aligned >= 3 ? "text-emerald-400" :
+                            judgment.evidence_pillars.aligned === 2 ? "text-amber-400" :
+                            "text-red-400"
+                          }`}>
+                            {judgment.evidence_pillars.aligned}/{judgment.evidence_pillars.total}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-4 gap-1.5 text-[11px]">
+                          {(["trend", "momentum", "volume", "price"] as const).map((p) => {
+                            const ok = judgment.evidence_pillars?.[p];
+                            return (
+                              <div key={p} className={`flex items-center justify-center gap-1 rounded px-1.5 py-1 border ${
+                                ok ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                                   : "bg-slate-700/30 border-slate-600/40 text-slate-500"
+                              }`}>
+                                <span>{ok ? "✓" : "✗"}</span>
+                                <span className="capitalize">{p}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     <p className="text-xs text-slate-500 bg-slate-800/50 rounded-lg p-2">{judgment.judge_reason}</p>
                     {/* Probability of hitting target — full indicator breakdown */}
                     <TargetHitBreakdown judgment={judgment} />
