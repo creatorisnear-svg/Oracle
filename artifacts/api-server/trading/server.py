@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import time
+import urllib.parse
+import urllib.request
 
 import numpy as np
 import pandas as pd
@@ -214,15 +216,124 @@ def get_news(symbol: str):
 
 
 @app.get("/api/fear-greed")
-def fear_greed():
-    """Composite Fear & Greed Index (0-100) from VIX + P/C ratio + SPY momentum + junk bonds."""
+def fear_greed(nocache: bool = False):
+    """Composite Fear & Greed Index (0-100) from VIX + P/C ratio + SPY momentum + junk bonds.
+    Pass ?nocache=1 to bypass the 60-second cache (used by the manual refresh button)."""
     try:
+        if nocache:
+            FearGreedAgent._cache = {}
+            FearGreedAgent._cache_ts = 0
         agent = FearGreedAgent()
         fg = agent._compute_fear_greed()
         return {"status": "ok", **_sanitize(fg)}
     except Exception as e:
         logger.error(f"Fear/Greed error: {e}")
         return {"error": str(e), "score": 50, "label": "Unknown"}
+
+
+def _compute_stock_sentiment(sym: str, ind: dict | None = None) -> dict:
+    """Per-stock sentiment 0-100 (Fear→Greed) built from technicals on THIS ticker.
+    Unlike the market-wide F&G index, this score changes per symbol so the user
+    sees something meaningful when switching stocks."""
+    components = []
+    try:
+        if ind is None:
+            df, _ = get_df(sym, period="3mo", interval="1d")
+            ind = compute_all_indicators(df)
+
+        def clamp(v, lo, hi):
+            return max(lo, min(hi, v))
+
+        # 1. RSI (30%) — a position-on-the-spectrum indicator
+        rsi = float(ind.get("rsi14") or 50)
+        rsi_score = clamp(rsi, 5, 95)
+        components.append({"name": "RSI", "score": round(rsi_score, 1),
+                           "value": round(rsi, 1), "weight": 0.30,
+                           "label": f"RSI {rsi:.0f}"})
+
+        # 2. Price vs VWAP (20%)
+        p_vwap = float(ind.get("price_vs_vwap_pct") or 0)
+        vwap_score = clamp(50 + p_vwap * 6, 5, 95)
+        components.append({"name": "Price vs VWAP", "score": round(vwap_score, 1),
+                           "value": round(p_vwap, 2), "weight": 0.20,
+                           "label": f"{p_vwap:+.2f}% vs VWAP"})
+
+        # 3. Trend score (20%)
+        ts = float(ind.get("trend_score") or 0)
+        ts_score = clamp(50 + ts * 8, 5, 95)
+        components.append({"name": "Trend", "score": round(ts_score, 1),
+                           "value": round(ts, 2), "weight": 0.20,
+                           "label": f"Trend {ts:+.1f}"})
+
+        # 4. Volume confirmation (15%) — high volume on up day = greed; on down day = fear
+        rv = float(ind.get("rel_volume") or 1)
+        chg = float(ind.get("change_1d") or 0)
+        delta = clamp((rv - 1) * 30, -30, 30)
+        vol_score = clamp(50 + (delta if chg >= 0 else -delta), 5, 95)
+        components.append({"name": "Volume", "score": round(vol_score, 1),
+                           "value": round(rv, 2), "weight": 0.15,
+                           "label": f"Rel vol {rv:.1f}x"})
+
+        # 5. MACD histogram (15%)
+        mh = float(ind.get("macd_hist") or 0)
+        macd_score = clamp(50 + mh * 200, 5, 95)
+        components.append({"name": "MACD", "score": round(macd_score, 1),
+                           "value": round(mh, 3), "weight": 0.15,
+                           "label": "MACD bullish" if mh >= 0 else "MACD bearish"})
+
+        total_w = sum(c["weight"] for c in components)
+        score = round(sum(c["score"] * c["weight"] for c in components) / total_w, 1) if total_w else 50.0
+
+        if score >= 75: label, color = "Extreme Greed", "#10b981"
+        elif score >= 55: label, color = "Greed", "#22c55e"
+        elif score >= 45: label, color = "Neutral", "#f59e0b"
+        elif score >= 25: label, color = "Fear", "#f97316"
+        else: label, color = "Extreme Fear", "#ef4444"
+
+        return {"symbol": sym, "score": score, "label": label,
+                "color": color, "components": components}
+    except Exception as e:
+        logger.error(f"Stock sentiment {sym}: {e}")
+        return {"symbol": sym, "score": 50, "label": "Unknown",
+                "color": "#94a3b8", "components": [], "error": str(e)}
+
+
+@app.get("/api/stock-sentiment/{symbol}")
+def stock_sentiment(symbol: str):
+    """Per-symbol Fear/Greed-style score derived from this stock's own technicals."""
+    return _sanitize(_compute_stock_sentiment(symbol.upper()))
+
+
+@app.get("/api/search")
+def search_symbols(q: str = "", limit: int = 8):
+    """Suggest tickers matching a query (e.g. 'app' → AAPL, APP, APPS).
+    Used by the dashboard's autocomplete dropdown so users don't have to know exact tickers."""
+    q = (q or "").strip()
+    if len(q) < 1:
+        return {"query": q, "results": []}
+    try:
+        url = (
+            "https://query1.finance.yahoo.com/v1/finance/search"
+            f"?q={urllib.parse.quote(q)}&quotesCount={int(limit)}&newsCount=0&listsCount=0"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode())
+        results = []
+        for item in (data.get("quotes") or [])[: int(limit)]:
+            sym = item.get("symbol") or ""
+            if not sym:
+                continue
+            results.append({
+                "symbol": sym,
+                "name": item.get("shortname") or item.get("longname") or "",
+                "exchange": item.get("exchDisp") or item.get("exchange") or "",
+                "type": item.get("quoteType") or item.get("typeDisp") or "",
+            })
+        return {"query": q, "results": results}
+    except Exception as e:
+        logger.error(f"Search error '{q}': {e}")
+        return {"query": q, "results": [], "error": str(e)}
 
 
 @app.get("/api/political-news")
@@ -570,6 +681,9 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
 
         safe_ind = _sanitize(ind)
 
+        # Per-stock sentiment (changes per ticker so the gauge isn't frozen)
+        stock_sent = _sanitize(_compute_stock_sentiment(sym, ind))
+
         await websocket.send_text(json.dumps({
             "type": "judgment",
             "judgment": judgment,
@@ -577,6 +691,7 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             "indicators": safe_ind,
             "forecast_line": judgment.get("forecast_line", []),
             "accuracy": accuracy,
+            "stock_sentiment": stock_sent,
         }))
 
         # 9. Keep alive

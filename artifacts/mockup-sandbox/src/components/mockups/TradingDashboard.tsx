@@ -49,6 +49,8 @@ interface OptionsChain {
 }
 interface FearGreedComp { name: string; score: number; value: number; label: string; weight: number; }
 interface FearGreed { score: number; label: string; color: string; components: FearGreedComp[]; }
+interface StockSentiment { symbol: string; score: number; label: string; color: string; components: FearGreedComp[]; }
+interface SearchResult { symbol: string; name: string; exchange: string; type: string; }
 interface AccuracyAgent {
   agent: string; total: number; correct: number;
   win_rate: number; call_correct: number; put_correct: number;
@@ -158,8 +160,16 @@ export default function TradingDashboard() {
   const [indicators, setIndicators] = useState<Record<string, unknown>>({});
   const [politicalNews, setPoliticalNews] = useState<NewsItem[]>([]);
   const [fearGreed, setFearGreed] = useState<FearGreed | null>(null);
+  const [stockSentiment, setStockSentiment] = useState<StockSentiment | null>(null);
   const [accuracy, setAccuracy] = useState<AccuracyReport | null>(null);
   const [fearLoading, setFearLoading] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchActiveIdx, setSearchActiveIdx] = useState(-1);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchBoxRef = useRef<HTMLDivElement>(null);
   const [indicators_visible, setIndicatorsVisible] = useState({ ema: true, bb: false, vwap: true, st: false, vol: true });
   const [chain, setChain] = useState<OptionsChain | null>(null);
   const [chainLoading, setChainLoading] = useState(false);
@@ -352,17 +362,70 @@ export default function TradingDashboard() {
   }, [judgment]);
 
   // ── Load Fear & Greed and political news ──────────────────────────────
-  const loadFearGreed = useCallback(async () => {
+  const loadFearGreed = useCallback(async (force = false) => {
     setFearLoading(true);
     try {
       const [fgRes, polRes] = await Promise.all([
-        fetch(`${API_BASE}/fear-greed`),
+        fetch(`${API_BASE}/fear-greed${force ? "?nocache=1" : ""}`),
         fetch(`${API_BASE}/political-news`),
       ]);
       if (fgRes.ok) { const d = await fgRes.json(); if (!d.error) setFearGreed(d); }
       if (polRes.ok) { const d = await polRes.json(); setPoliticalNews(d.news || []); }
     } catch {}
     setFearLoading(false);
+  }, []);
+
+  // ── Load per-stock sentiment (changes per ticker) ─────────────────────
+  const loadStockSentiment = useCallback(async (sym: string) => {
+    if (!sym) return;
+    try {
+      const res = await fetch(`${API_BASE}/stock-sentiment/${sym}`);
+      if (res.ok) {
+        const d: StockSentiment = await res.json();
+        if (!(d as any).error) setStockSentiment(d);
+      }
+    } catch {}
+  }, []);
+
+  // ── Symbol search (autocomplete) ──────────────────────────────────────
+  const runSearch = useCallback((q: string) => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    if (!q || q.length < 1) {
+      setSearchResults([]);
+      setSearchOpen(false);
+      setSearchLoading(false);
+      return;
+    }
+    searchDebounceRef.current = setTimeout(async () => {
+      if (searchAbortRef.current) searchAbortRef.current.abort();
+      const ctrl = new AbortController();
+      searchAbortRef.current = ctrl;
+      setSearchLoading(true);
+      try {
+        const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}&limit=8`, { signal: ctrl.signal });
+        if (res.ok) {
+          const d = await res.json();
+          setSearchResults(d.results || []);
+          setSearchOpen((d.results || []).length > 0);
+          setSearchActiveIdx(-1);
+        }
+      } catch (e: any) {
+        if (e?.name !== "AbortError") console.error("Search error", e);
+      } finally {
+        setSearchLoading(false);
+      }
+    }, 200);
+  }, []);
+
+  // Close suggestion dropdown when clicking outside the search box
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) {
+        setSearchOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
   // ── Load accuracy report ───────────────────────────────────────────────
@@ -385,6 +448,7 @@ export default function TradingDashboard() {
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     setVotes([]);
     setJudgment(null);
+    setStockSentiment(null);
     setStatus("");
     setAnalyzing(true);
 
@@ -401,6 +465,7 @@ export default function TradingDashboard() {
         if (msg.indicators) setIndicators(msg.indicators);
         setJudgment(j);
         if (msg.accuracy) setAccuracy(msg.accuracy);
+        if (msg.stock_sentiment) setStockSentiment(msg.stock_sentiment);
         setAnalyzing(false);
         setStatus("");
         setTab("signal");
@@ -415,11 +480,14 @@ export default function TradingDashboard() {
     ws.onclose = () => { if (analyzing) setAnalyzing(false); };
   }, []);
 
-  const handleAnalyze = () => {
-    const s = inputSym.trim().toUpperCase();
+  const handleAnalyze = (overrideSym?: string) => {
+    const s = (overrideSym ?? inputSym).trim().toUpperCase();
     if (!s) return;
+    setInputSym(s);
     setSymbol(s);
     symRef.current = s;
+    setSearchOpen(false);
+    setSearchResults([]);
     runAnalysis(s);
   };
 
@@ -442,14 +510,63 @@ export default function TradingDashboard() {
             <div className="text-xs text-slate-500">9-AGENT · CALL/PUT · REAL-TIME</div>
           </div>
         </div>
-        <input
-          className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm font-mono w-28 focus:outline-none focus:border-blue-500"
-          value={inputSym} onChange={e => setInputSym(e.target.value.toUpperCase())}
-          onKeyDown={e => e.key === "Enter" && handleAnalyze()}
-          placeholder="AAPL"
-        />
+        <div ref={searchBoxRef} className="relative">
+          <input
+            className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm font-mono w-44 focus:outline-none focus:border-blue-500"
+            value={inputSym}
+            onChange={e => {
+              const v = e.target.value.toUpperCase();
+              setInputSym(v);
+              runSearch(v);
+            }}
+            onFocus={() => { if (searchResults.length > 0) setSearchOpen(true); }}
+            onKeyDown={e => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setSearchActiveIdx(i => Math.min(i + 1, searchResults.length - 1));
+                if (!searchOpen && searchResults.length) setSearchOpen(true);
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setSearchActiveIdx(i => Math.max(i - 1, -1));
+              } else if (e.key === "Escape") {
+                setSearchOpen(false);
+              } else if (e.key === "Enter") {
+                if (searchOpen && searchActiveIdx >= 0 && searchResults[searchActiveIdx]) {
+                  handleAnalyze(searchResults[searchActiveIdx].symbol);
+                } else {
+                  handleAnalyze();
+                }
+              }
+            }}
+            placeholder="Search ticker or name…"
+            autoComplete="off"
+          />
+          {searchOpen && (searchResults.length > 0 || searchLoading) && (
+            <div className="absolute left-0 top-full mt-1 w-72 max-h-80 overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg shadow-2xl z-50">
+              {searchLoading && searchResults.length === 0 && (
+                <div className="px-3 py-2 text-xs text-slate-500">Searching…</div>
+              )}
+              {searchResults.map((r, i) => (
+                <button
+                  key={`${r.symbol}-${i}`}
+                  onMouseDown={(e) => { e.preventDefault(); handleAnalyze(r.symbol); }}
+                  onMouseEnter={() => setSearchActiveIdx(i)}
+                  className={`w-full text-left px-3 py-2 flex items-center gap-2 border-b border-slate-800 last:border-0 ${
+                    i === searchActiveIdx ? "bg-slate-800" : "hover:bg-slate-800/60"
+                  }`}
+                >
+                  <span className="font-mono font-bold text-sm text-blue-400 w-16 shrink-0">{r.symbol}</span>
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-xs text-slate-200 truncate">{r.name || "—"}</span>
+                    <span className="block text-xs text-slate-500">{r.exchange}{r.type ? ` · ${r.type}` : ""}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
         <button
-          onClick={handleAnalyze}
+          onClick={() => handleAnalyze()}
           disabled={analyzing}
           className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-1.5 rounded-lg text-sm font-bold transition-all"
         >
@@ -530,16 +647,31 @@ export default function TradingDashboard() {
 
         {/* ── RIGHT: Sidebar ── */}
         <div className="w-72 flex flex-col border-l border-slate-700/50 bg-[#0d1524] shrink-0 overflow-hidden">
-          {/* Fear & Greed mini strip */}
-          {fearGreed && (
-            <div className="px-3 py-2 border-b border-slate-800 shrink-0">
-              <div className="flex items-center justify-between text-xs mb-1">
-                <span className="text-slate-500 font-semibold">FEAR & GREED INDEX</span>
-                <span className="font-bold" style={{ color: fearGreed.color }}>{fearGreed.score} — {fearGreed.label}</span>
-              </div>
-              <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
-                <div className="h-full rounded-full transition-all" style={{ width: `${fearGreed.score}%`, background: `linear-gradient(90deg, #ef4444, #f97316, #f59e0b, #22c55e, #10b981)` }} />
-              </div>
+          {/* Fear & Greed mini strip — market-wide AND per-stock */}
+          {(fearGreed || stockSentiment) && (
+            <div className="px-3 py-2 border-b border-slate-800 shrink-0 space-y-2">
+              {fearGreed && (
+                <div>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="text-slate-500 font-semibold">MARKET F&G</span>
+                    <span className="font-bold" style={{ color: fearGreed.color }}>{fearGreed.score} — {fearGreed.label}</span>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden relative">
+                    <div className="h-full rounded-full transition-all" style={{ width: `${fearGreed.score}%`, background: `linear-gradient(90deg, #ef4444, #f97316, #f59e0b, #22c55e, #10b981)` }} />
+                  </div>
+                </div>
+              )}
+              {stockSentiment && (
+                <div>
+                  <div className="flex items-center justify-between text-xs mb-1">
+                    <span className="text-slate-500 font-semibold">{stockSentiment.symbol} SENTIMENT</span>
+                    <span className="font-bold" style={{ color: stockSentiment.color }}>{stockSentiment.score} — {stockSentiment.label}</span>
+                  </div>
+                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden relative">
+                    <div className="h-full rounded-full transition-all" style={{ width: `${stockSentiment.score}%`, background: `linear-gradient(90deg, #ef4444, #f97316, #f59e0b, #22c55e, #10b981)` }} />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -836,7 +968,7 @@ export default function TradingDashboard() {
                 <FearGreedGauge data={fearGreed} />
                 {fearGreed && (
                   <div className="space-y-2">
-                    <div className="text-xs text-slate-500 font-semibold uppercase">Components</div>
+                    <div className="text-xs text-slate-500 font-semibold uppercase">Market Components</div>
                     {fearGreed.components.map((c, i) => (
                       <div key={i} className="bg-slate-800/60 rounded-lg p-2.5">
                         <div className="flex justify-between items-center mb-1">
@@ -850,8 +982,31 @@ export default function TradingDashboard() {
                   </div>
                 )}
 
+                {/* Per-stock sentiment */}
+                {stockSentiment && (
+                  <div className="space-y-2 pt-2 border-t border-slate-800">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs text-slate-500 font-semibold uppercase">{stockSentiment.symbol} Sentiment</div>
+                      <span className="text-xs font-bold" style={{ color: stockSentiment.color }}>{stockSentiment.score} — {stockSentiment.label}</span>
+                    </div>
+                    {stockSentiment.components.map((c, i) => (
+                      <div key={i} className="bg-slate-800/60 rounded-lg p-2.5">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-xs font-semibold text-slate-300">{c.name}</span>
+                          <span className={`text-xs font-bold ${c.score >= 60 ? "text-emerald-400" : c.score <= 40 ? "text-red-400" : "text-amber-400"}`}>{c.score.toFixed(0)}/100</span>
+                        </div>
+                        <AccBar pct={c.score} color={c.score >= 60 ? "#10b981" : c.score <= 40 ? "#ef4444" : "#f59e0b"} />
+                        <div className="text-xs text-slate-500 mt-1">{c.label}</div>
+                      </div>
+                    ))}
+                    <button onClick={() => loadStockSentiment(symbol)} className="w-full text-xs text-blue-400 hover:text-blue-300 py-1">
+                      ↻ Refresh {symbol} sentiment
+                    </button>
+                  </div>
+                )}
+
                 <div className="text-xs text-slate-500 font-semibold uppercase mt-4">Trump / Macro News</div>
-                {fearLoading && <p className="text-xs text-slate-500 animate-pulse">Loading political news...</p>}
+                {fearLoading && <p className="text-xs text-slate-500 animate-pulse">Refreshing market data…</p>}
                 {politicalNews.length === 0 && !fearLoading && (
                   <p className="text-xs text-slate-500">No political news loaded yet.</p>
                 )}
@@ -862,8 +1017,8 @@ export default function TradingDashboard() {
                     <div className="text-xs text-slate-600 mt-1">{n.source} · {n.published_at?.slice(0, 16)}</div>
                   </a>
                 ))}
-                <button onClick={loadFearGreed} className="w-full mt-2 text-xs text-blue-400 hover:text-blue-300 py-1">
-                  ↻ Refresh Fear & Greed + News
+                <button onClick={() => { loadFearGreed(true); loadStockSentiment(symbol); }} className="w-full mt-2 text-xs text-blue-400 hover:text-blue-300 py-1">
+                  ↻ Force refresh Fear & Greed + News
                 </button>
               </div>
             )}

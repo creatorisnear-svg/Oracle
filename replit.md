@@ -39,7 +39,10 @@ Then open `http://localhost:8081` in your browser.
 - `GET /api/watchlist?symbols=AAPL,MSFT,...` — batch signals
 - `GET /api/learning/weights` — agent accuracy + learned weights
 - `GET /api/learning/history/{symbol}` — prediction history + outcomes
-- `WS /api/ws/analyze/{symbol}` — live WebSocket stream (agent votes + judgment)
+- `GET /api/fear-greed?nocache=1` — market-wide Fear & Greed (60-second cache; pass `nocache=1` to force refresh)
+- `GET /api/stock-sentiment/{symbol}` — per-ticker sentiment 0-100 from RSI, VWAP, trend, volume, MACD
+- `GET /api/search?q=app&limit=8` — ticker autocomplete (Yahoo Finance lookup) used by the dashboard search box
+- `WS /api/ws/analyze/{symbol}` — live WebSocket stream (agent votes + judgment + per-stock sentiment)
 
 ## Learning System (`trading/learning.py`)
 - Every prediction saved to SQLite (`predictions.db`)

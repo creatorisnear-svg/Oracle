@@ -444,7 +444,7 @@ class FearGreedAgent:
 
     _cache: dict = {}
     _cache_ts: float = 0
-    CACHE_TTL = 300  # 5 minutes
+    CACHE_TTL = 60  # 1 minute — keeps the gauge moving instead of frozen
 
     def _compute_fear_greed(self) -> dict:
         """Compute CNN-style Fear & Greed Index from real market data."""
