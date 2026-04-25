@@ -731,25 +731,40 @@ class JudgeAgent:
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
         opts = suggest_options(direction, price, atr, ind)
 
-        # Forecast line — real trading days + S-curve easing
+        # ── Forecast line ────────────────────────────────────────────────
+        # 1. Anchor first point at NOW + current price so the line visually connects to the live chart
+        # 2. Project toward the target with magnitude scaled by confidence:
+        #    high conviction → the line reaches the target; low conviction → it falls short
+        # 3. Use real trading days (Mon–Fri) for the next 7 sessions
         from datetime import datetime, timedelta, timezone
         forecast = []
         now_ts = int(time.time())
         if signal != "HOLD":
+            # Anchor: forecast starts AT current price/now so it joins the chart's last candle
+            forecast.append({"time": now_ts, "value": round(price, 2)})
+
+            # Generate next 7 trading-day timestamps after now
             dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
-            trading_days = []
+            trading_days: list[int] = []
             while len(trading_days) < 7:
                 dt += timedelta(days=1)
                 if dt.weekday() < 5:  # Mon–Fri only
                     trading_days.append(int(dt.timestamp()))
-            max_move = min(atr * 0.6, abs(target - price))
+
+            # Confidence scales how far the projection actually reaches.
+            # 50% conf → 50% of the way to target; 95% conf → 95% of the way.
+            conf_scale = max(0.30, min(0.95, conf / 100.0))
+            full_move = abs(target - price)
+            max_move = full_move * conf_scale
+
             for i, ts in enumerate(trading_days):
                 progress = (i + 1) / 7
                 ease = progress * progress * (3 - 2 * progress)  # smooth S-curve
+                delta = max_move * ease
                 if signal == "BUY_CALL":
-                    proj = min(price + max_move * ease, target)
+                    proj = min(price + delta, target)
                 else:
-                    proj = max(price - max_move * ease, target)
+                    proj = max(price - delta, target)
                 forecast.append({"time": ts, "value": round(proj, 2)})
 
         vola = ind.get("volatility_20d", 25)
