@@ -1439,6 +1439,25 @@ class JudgeAgent:
             # Squeeze fuel adds upside — small boost
             conf *= 1.04
 
+        # ── AI-discovered strategies (self-learned rules) ──────────
+        # The meta-learning layer mines historical predictions and extracts
+        # indicator combinations with a real win-rate edge. If those rules
+        # are firing today AND agree with our signal, we boost confidence.
+        # If they disagree, we fade it.
+        disc = ind.get("discovered_strategies") or {}
+        disc_lean = disc.get("lean", "HOLD")
+        disc_boost = float(disc.get("confidence_boost") or 0)  # already ±8%
+        if signal == "BUY_CALL":
+            if disc_lean == "BUY_CALL":
+                conf += abs(disc_boost)
+            elif disc_lean == "BUY_PUT":
+                conf -= abs(disc_boost) * 0.6
+        elif signal == "BUY_PUT":
+            if disc_lean == "BUY_PUT":
+                conf += abs(disc_boost)
+            elif disc_lean == "BUY_CALL":
+                conf -= abs(disc_boost) * 0.6
+
         conf = max(40.0, min(95.0, conf))
 
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
@@ -1560,6 +1579,7 @@ class JudgeAgent:
                 "sector_rotation": ind.get("sector_rotation"),
                 "fundamentals": fund,
                 "short_squeeze": squeeze,
+                "discovered_strategies": disc,
             },
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],

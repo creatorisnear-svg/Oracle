@@ -219,6 +219,21 @@ def get_status() -> dict:
     }
 
 
+async def _refresh_meta_learning():
+    """
+    Re-mine the indicator-snapshot log: rebuild per-regime / per-symbol agent
+    accuracy and (re)derive the AI-discovered strategies. Cheap (no yfinance).
+    """
+    try:
+        import meta_learning
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, meta_learning.update_regime_symbol_perf)
+        rules = await loop.run_in_executor(None, meta_learning.discover_strategies)
+        logger.info(f"meta-learning: discovered {len(rules)} strategies")
+    except Exception as e:
+        logger.warning(f"meta-learning refresh failed: {e}")
+
+
 async def _background_loop():
     """Forever loop. On boot: refresh stale files. Then repeat every LOOP_INTERVAL_HOURS."""
     # Stagger startup so the first analysis request isn't competing for yfinance.
@@ -228,6 +243,8 @@ async def _background_loop():
             # Run sequentially — both touch yfinance and use ~1 CPU core each.
             await refresh_regime_stats()
             await refresh_track_record()
+            # Cheap, snapshot-only — also rerun every loop tick.
+            await _refresh_meta_learning()
         except Exception as e:
             logger.error(f"auto-refresh loop tick error: {e}")
         await asyncio.sleep(LOOP_INTERVAL_HOURS * 3600)

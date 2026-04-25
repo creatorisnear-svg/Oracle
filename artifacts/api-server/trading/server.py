@@ -59,6 +59,11 @@ AGENTS = [
 JUDGE = JudgeAgent()
 LEARNING = LearningSystem()
 
+# Meta-learning: indicator-snapshot logging, per-regime weighting,
+# and AI-discovered strategy mining. See trading/meta_learning.py.
+import meta_learning  # noqa: E402
+meta_learning.bootstrap()
+
 # Live price cache  {symbol → {price, change_pct, ts, news}}
 _LIVE_CACHE: dict[str, dict] = {}
 # WebSocket clients  {symbol → set of WebSocket}
@@ -458,6 +463,22 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict):
     ind["fundamentals"] = _fundamentals(sym)
     ind["short_squeeze"] = _short_squeeze_score(sym, ind)
     weights = LEARNING.get_weights()
+
+    # Meta-learning multipliers (per regime + per symbol).
+    regime_label = (ind.get("market_regime") or {}).get("label", "unknown")
+    try:
+        regime_mults = meta_learning.get_regime_multipliers()
+        symbol_mults = meta_learning.get_symbol_multipliers()
+    except Exception:
+        regime_mults, symbol_mults = {}, {}
+
+    # Evaluate AI-discovered strategies on the current indicator state.
+    try:
+        ind["discovered_strategies"] = meta_learning.evaluate_discovered(ind)
+    except Exception:
+        ind["discovered_strategies"] = {"fired": [], "lean": "HOLD",
+                                        "score": 0.0, "confidence_boost": 0.0}
+
     votes = []
     for agent in AGENTS:
         try:
@@ -466,8 +487,17 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict):
             vote = {"agent": agent.name, "emoji": "❓", "vote": "HOLD",
                     "confidence": 50.0, "reason": str(e)}
         w = weights.get(agent.name, 1.0)
-        vote["confidence"] = round(min(vote.get("confidence", 50) * w, 97), 1)
-        vote["weight"] = round(w, 3)
+        # Stack regime + symbol learning on top of base weight (each ±~30%)
+        rw = regime_mults.get((agent.name, regime_label), 1.0)
+        sw = symbol_mults.get((agent.name, sym), 1.0)
+        eff_w = w * rw * sw
+        vote["confidence"] = round(min(vote.get("confidence", 50) * eff_w, 97), 1)
+        vote["weight"] = round(eff_w, 3)
+        vote["weight_breakdown"] = {
+            "base": round(w, 3),
+            "regime": round(rw, 3),
+            "symbol": round(sw, 3),
+        }
         votes.append(vote)
     return votes, ind
 
@@ -869,7 +899,7 @@ def analyze(symbol: str, period: str = "3mo"):
         df, info = get_df(sym, period=period)
         votes, ind = run_agents_sync(sym, df, info)
         judgment = JUDGE.decide(votes, ind)
-        LEARNING.save_prediction(
+        pred_id = LEARNING.save_prediction(
             symbol=sym, signal=judgment["signal"],
             confidence=judgment["confidence"],
             entry_price=judgment["entry_price"],
@@ -877,6 +907,10 @@ def analyze(symbol: str, period: str = "3mo"):
             stop_loss=judgment["stop_loss"],
             agent_votes={v["agent"]: v["vote"] for v in votes},
         )
+        try:
+            meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
+        except Exception:
+            pass
         safe_ind = _sanitize(ind)
         return {
             "symbol": sym,
@@ -956,6 +990,43 @@ async def admin_refresh_regime_stats(force: bool = False):
     return await auto_refresh.refresh_regime_stats(force=force)
 
 
+@app.post("/api/admin/learn/discover")
+def admin_discover_strategies():
+    """
+    Mine the indicator-snapshot log for self-discovered indicator combinations
+    that have an empirical edge. Also refreshes per-regime / per-symbol agent
+    accuracy. Returns the list of discovered strategies.
+    """
+    try:
+        meta_learning.update_regime_symbol_perf()
+        rules = meta_learning.discover_strategies()
+        return {"ok": True, "count": len(rules), "strategies": rules}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/admin/learn/status")
+def admin_learn_status():
+    """Inspect what the meta-learning layer currently knows."""
+    try:
+        rules = meta_learning.load_strategies()
+        rmults = meta_learning.get_regime_multipliers()
+        smults = meta_learning.get_symbol_multipliers()
+        return {
+            "discovered_strategies": rules,
+            "regime_multipliers": [
+                {"agent": k[0], "regime": k[1], "multiplier": v}
+                for k, v in rmults.items()
+            ],
+            "symbol_multipliers": [
+                {"agent": k[0], "symbol": k[1], "multiplier": v}
+                for k, v in smults.items()
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # WEBSOCKET — 9-agent live analysis + live price streaming every 3s
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1018,7 +1089,7 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
         judgment = JUDGE.decide(votes, ind)
 
         # 6. Persist
-        LEARNING.save_prediction(
+        pred_id = LEARNING.save_prediction(
             symbol=sym, signal=judgment["signal"],
             confidence=judgment["confidence"],
             entry_price=judgment["entry_price"],
@@ -1026,6 +1097,10 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             stop_loss=judgment["stop_loss"],
             agent_votes={v["agent"]: v["vote"] for v in votes},
         )
+        try:
+            meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
+        except Exception:
+            pass
 
         # 7. Verify past outcomes
         if live.get("price", 0):
