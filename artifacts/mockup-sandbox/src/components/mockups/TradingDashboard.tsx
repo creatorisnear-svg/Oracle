@@ -1,703 +1,862 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  createChart,
-  ColorType,
-  CrosshairMode,
-  CandlestickSeries,
-  LineSeries,
-  HistogramSeries,
+  createChart, ColorType, CrosshairMode,
+  CandlestickSeries, LineSeries, HistogramSeries,
   createSeriesMarkers,
-  type IChartApi,
-  type UTCTimestamp,
+  type IChartApi, type UTCTimestamp,
 } from "lightweight-charts";
 
 const API_BASE = "/api";
+const WS_BASE = typeof window !== "undefined"
+  ? (window.location.protocol === "https:" ? "wss" : "ws") + "://" + window.location.host
+  : "";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-type Vote = "BUY" | "SELL" | "HOLD";
+// ─── Types ─────────────────────────────────────────────────────────────────
+type Signal = "BUY_CALL" | "BUY_PUT" | "HOLD";
 
 interface AgentVote {
-  agent: string; emoji: string; vote: Vote;
-  confidence: number; reason: string;
-  weight?: number; accuracy?: number; predictions_tracked?: number;
+  agent: string; emoji: string; vote: Signal;
+  confidence: number; reason: string; weight?: number;
+  stop_loss_long?: number; stop_loss_short?: number;
+  target_long?: number; target_short?: number;
+  atr?: number; volatility_pct?: number;
 }
 
 interface Judgment {
-  signal: Vote; confidence: number;
-  entry_price: number; stop_loss: number; target_price: number;
-  agreed_agents: string[]; disagreed_agents: string[];
-  vote_tally: { BUY: number; SELL: number; HOLD: number };
-  position_size_pct: number; judge_reason: string; prediction_id?: number;
+  signal: Signal;
+  confidence: number;
+  entry_price: number;
+  stop_loss: number;
+  target_price: number;
+  agreed_agents: string[];
+  disagreed_agents: string[];
+  vote_tally: { BUY_CALL: number; BUY_PUT: number; HOLD: number };
+  position_size_pct: number;
+  judge_reason: string;
+  action: string;
+  strike_hint: string;
+  expiry_hint: string;
+  entry_trigger: string;
+  risk_note: string;
+  forecast_line?: { time: number; value: number }[];
 }
 
-interface TickerData {
-  symbol: string; price: number; prev_close: number;
-  change_pct: number; volume: number; avg_volume: number;
-  company_name: string; sector: string;
-  week_52_high: number; week_52_low: number;
+interface LivePrice {
+  symbol: string; price: number; change_pct: number;
+  ts: number; market_state: string;
+  news?: { title: string; summary: string; source: string; url: string; published_at: string }[];
 }
 
-interface Candle {
-  time: UTCTimestamp; open: number; high: number; low: number; close: number; volume: number;
+interface Indicators {
+  rsi14?: number; macd?: number; macd_signal?: number; macd_hist?: number;
+  bb_upper?: number; bb_lower?: number; vwap?: number;
+  atr14?: number; volatility_20d?: number; rel_volume?: number;
+  trend_score?: number; supertrend_dir?: string;
+  price_vs_vwap_pct?: number; change_1d?: number; change_5d?: number;
+  stoch_k?: number; obv_slope_10d_pct?: number; up_dn_vol_ratio?: number;
 }
 
-interface ChartIndicators {
-  ema9: { time: UTCTimestamp; value: number }[];
-  ema21: { time: UTCTimestamp; value: number }[];
-  ema50: { time: UTCTimestamp; value: number }[];
-  bb_upper: { time: UTCTimestamp; value: number }[];
-  bb_lower: { time: UTCTimestamp; value: number }[];
-  bb_mid: { time: UTCTimestamp; value: number }[];
-  rsi: { time: UTCTimestamp; value: number }[];
-  macd_line: { time: UTCTimestamp; value: number }[];
-  macd_signal: { time: UTCTimestamp; value: number }[];
-  macd_hist: { time: UTCTimestamp; value: number }[];
-  volume: { time: UTCTimestamp; value: number }[];
+interface ChartPoint { time: UTCTimestamp; open?: number; high?: number; low?: number; close?: number; value?: number; color?: string; }
+
+// ─── Signal Styling ─────────────────────────────────────────────────────────
+function signalStyle(v: Signal) {
+  if (v === "BUY_CALL") return { bg: "bg-emerald-500/20", border: "border-emerald-500", text: "text-emerald-400", glow: "shadow-emerald-500/40" };
+  if (v === "BUY_PUT")  return { bg: "bg-red-500/20",     border: "border-red-500",     text: "text-red-400",     glow: "shadow-red-500/40" };
+  return { bg: "bg-slate-500/20", border: "border-slate-500", text: "text-slate-400", glow: "" };
 }
 
-interface ChartData { symbol: string; candles: Candle[]; indicators: ChartIndicators; }
-type AnalysisState = "idle" | "connecting" | "streaming" | "complete" | "error";
-type ChartState = "idle" | "loading" | "ready" | "error";
-
-// ─── Config ──────────────────────────────────────────────────────────────────
-const POPULAR = ["AAPL", "NVDA", "MSFT", "TSLA", "SPY", "QQQ", "AMZN", "META", "BTC-USD", "ETH-USD"];
-
-const VOTE_CFG: Record<Vote, { bg: string; border: string; text: string; bar: string }> = {
-  BUY:  { bg: "bg-emerald-950/60", border: "border-emerald-500/40", text: "text-emerald-300", bar: "bg-emerald-400" },
-  SELL: { bg: "bg-red-950/60",     border: "border-red-500/40",     text: "text-red-300",     bar: "bg-red-400"     },
-  HOLD: { bg: "bg-amber-950/40",   border: "border-amber-500/30",   text: "text-amber-300",   bar: "bg-amber-400"   },
-};
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-const fmt = (n: number, d = 2) => isFinite(n) ? n.toFixed(d) : "—";
-const fmtK = (n: number) =>
-  n >= 1e9 ? (n / 1e9).toFixed(2) + "B" :
-  n >= 1e6 ? (n / 1e6).toFixed(2) + "M" :
-  n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n);
-
-const CHART_THEME = {
-  layout: { background: { type: ColorType.Solid, color: "#08080d" }, textColor: "rgba(255,255,255,0.45)", fontFamily: "monospace", fontSize: 11 },
-  grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.04)" } },
-  crosshair: { mode: CrosshairMode.Normal, vertLine: { color: "rgba(255,255,255,0.3)", labelBackgroundColor: "#1a1a2e" }, horzLine: { color: "rgba(255,255,255,0.3)", labelBackgroundColor: "#1a1a2e" } },
-  rightPriceScale: { borderColor: "rgba(255,255,255,0.08)" },
-  timeScale: { borderColor: "rgba(255,255,255,0.08)", timeVisible: true, secondsVisible: false },
-};
-
-// ─── Small components ─────────────────────────────────────────────────────────
-function PulsingDot() {
+function SignalBadge({ signal, size = "md" }: { signal: Signal; size?: "sm" | "md" | "lg" }) {
+  const st = signalStyle(signal);
+  const sz = size === "lg" ? "text-2xl px-8 py-3 font-black tracking-widest" : size === "md" ? "text-sm px-3 py-1 font-bold" : "text-xs px-2 py-0.5 font-semibold";
+  const label = signal === "BUY_CALL" ? "⬆ CALL" : signal === "BUY_PUT" ? "⬇ PUT" : "⏸ HOLD";
   return (
-    <span className="relative flex h-2 w-2">
-      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-      <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-    </span>
-  );
-}
-function Dots() {
-  return (
-    <span className="inline-flex gap-0.5 ml-1">
-      {[0,1,2].map(i=>(
-        <span key={i} className="w-1 h-1 bg-current rounded-full animate-bounce" style={{animationDelay:`${i*120}ms`}} />
-      ))}
+    <span className={`rounded-full border ${st.bg} ${st.border} ${st.text} ${sz} shadow-lg ${st.glow}`}>
+      {label}
     </span>
   );
 }
 
-function AgentCard({ v }: { v: AgentVote }) {
-  const c = VOTE_CFG[v.vote];
+// ─── Confidence Ring ─────────────────────────────────────────────────────────
+function ConfRing({ pct, signal }: { pct: number; signal: Signal }) {
+  const r = 44, circ = 2 * Math.PI * r;
+  const dash = (pct / 100) * circ;
+  const color = signal === "BUY_CALL" ? "#10b981" : signal === "BUY_PUT" ? "#ef4444" : "#64748b";
   return (
-    <div className={`border rounded-xl p-3.5 transition-all duration-300 ${c.bg} ${c.border}`}>
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <span className="text-lg">{v.emoji}</span>
-          <span className="text-xs font-semibold text-white/80">{v.agent}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`text-xs font-black px-2 py-0.5 rounded-full border ${c.border} ${c.text} bg-black/30`}>{v.vote}</span>
-          <span className="text-xs text-white/40">{fmt(v.confidence, 0)}%</span>
-        </div>
+    <svg className="absolute inset-0" viewBox="0 0 100 100">
+      <circle cx="50" cy="50" r={r} fill="none" stroke="#1e293b" strokeWidth="8" />
+      <circle cx="50" cy="50" r={r} fill="none" stroke={color} strokeWidth="8"
+        strokeDasharray={`${dash} ${circ - dash}`} strokeDashoffset={circ / 4}
+        strokeLinecap="round" style={{ transition: "stroke-dasharray 0.6s ease" }} />
+    </svg>
+  );
+}
+
+// ─── Agent Card ──────────────────────────────────────────────────────────────
+function AgentCard({ vote, isNew }: { vote: AgentVote; isNew?: boolean }) {
+  const st = signalStyle(vote.vote);
+  return (
+    <div className={`rounded-xl border p-3 transition-all duration-500 ${isNew ? "scale-105 shadow-lg " + st.glow : ""} ${st.bg} ${st.border}`}>
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs font-semibold text-slate-300 flex items-center gap-1">
+          <span>{vote.emoji}</span> <span>{vote.agent}</span>
+          {vote.weight !== undefined && vote.weight !== 1 && (
+            <span className={`ml-1 text-[10px] ${vote.weight > 1 ? "text-emerald-400" : "text-red-400"}`}>
+              {vote.weight > 1 ? "▲" : "▼"}{vote.weight.toFixed(2)}×
+            </span>
+          )}
+        </span>
+        <SignalBadge signal={vote.vote} size="sm" />
       </div>
-      <div className="h-1 bg-white/5 rounded-full overflow-hidden mb-2">
-        <div className={`h-full rounded-full transition-all duration-700 ${c.bar}`} style={{ width: `${Math.min(v.confidence, 100)}%` }} />
-      </div>
-      <p className="text-[11px] text-white/40 leading-relaxed line-clamp-2">{v.reason}</p>
-      {(v.predictions_tracked ?? 0) > 0 && (
-        <div className="flex items-center gap-3 mt-2 pt-2 border-t border-white/5 text-[10px]">
-          <span className="text-white/30">Accuracy: <span className="text-white/50">{fmt((v.accuracy ?? 0.5)*100, 0)}%</span></span>
-          <span className="text-white/30">Weight: <span className={`${(v.weight??1)>1?"text-emerald-400":(v.weight??1)<0.9?"text-red-400":"text-white/50"}`}>{fmt(v.weight??1, 2)}x</span></span>
-          <span className="ml-auto text-white/25">{v.predictions_tracked} tracked</span>
+      <div className="flex items-center gap-2">
+        <div className="flex-1 bg-slate-700/50 rounded-full h-1.5">
+          <div className={`h-1.5 rounded-full transition-all duration-700 ${vote.vote === "BUY_CALL" ? "bg-emerald-400" : vote.vote === "BUY_PUT" ? "bg-red-400" : "bg-slate-500"}`}
+            style={{ width: `${vote.confidence}%` }} />
         </div>
-      )}
+        <span className={`text-xs font-mono font-bold ${st.text}`}>{vote.confidence.toFixed(0)}%</span>
+      </div>
+      <p className="text-[10px] text-slate-400 mt-1 leading-tight line-clamp-2">{vote.reason}</p>
     </div>
   );
 }
 
-function SignalPanel({ j }: { j: Judgment }) {
-  const colors = { BUY: "text-emerald-400", SELL: "text-red-400", HOLD: "text-amber-400" };
-  const shadows = { BUY: "0 0 40px rgba(52,211,153,0.3)", SELL: "0 0 40px rgba(248,113,113,0.3)", HOLD: "0 0 30px rgba(251,191,36,0.2)" };
-  const rr = j.entry_price && Math.abs(j.stop_loss - j.entry_price) > 0
-    ? Math.abs(j.target_price - j.entry_price) / Math.abs(j.stop_loss - j.entry_price) : 0;
-
+// ─── Period Selector ─────────────────────────────────────────────────────────
+function PeriodBtn({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
-    <div className="space-y-4">
-      {/* Big signal */}
-      <div className="text-center py-5">
-        <div className={`text-5xl font-black tracking-widest ${colors[j.signal]}`} style={{textShadow: shadows[j.signal]}}>{j.signal}</div>
-        <div className="text-xl font-bold text-white mt-1">{fmt(j.confidence)}%</div>
-        <p className="text-[11px] text-white/35 mt-1.5 leading-relaxed px-2">{j.judge_reason}</p>
-      </div>
-
-      {/* Trade levels */}
-      <div className="bg-white/3 border border-white/8 rounded-xl overflow-hidden">
-        <div className="grid grid-cols-3 divide-x divide-white/8">
-          {[{label:"ENTRY",val:`$${fmt(j.entry_price)}`,col:"text-white"},
-            {label:"STOP",val:`$${fmt(j.stop_loss)}`,col:"text-red-400"},
-            {label:"TARGET",val:`$${fmt(j.target_price)}`,col:"text-emerald-400"}]
-            .map(({label,val,col})=>(
-              <div key={label} className="p-3 text-center">
-                <div className="text-[9px] text-white/35 uppercase tracking-widest mb-1">{label}</div>
-                <div className={`text-sm font-bold font-mono ${col}`}>{val}</div>
-              </div>
-            ))}
-        </div>
-        {rr > 0 && (
-          <div className="border-t border-white/8 px-4 py-2 flex justify-between">
-            <span className="text-[11px] text-white/35">Risk / Reward</span>
-            <span className={`text-[11px] font-bold ${rr>=2?"text-emerald-400":rr>=1.5?"text-amber-400":"text-red-400"}`}>{fmt(rr,2)}x</span>
-          </div>
-        )}
-        {j.signal !== "HOLD" && (
-          <div className="border-t border-white/8 px-4 py-2 flex justify-between">
-            <span className="text-[11px] text-white/35">Position Size</span>
-            <span className="text-[11px] font-bold text-purple-400">{j.position_size_pct}%</span>
-          </div>
-        )}
-      </div>
-
-      {/* Tally */}
-      <div className="space-y-2">
-        {(["BUY","SELL","HOLD"] as Vote[]).map(v => {
-          const n = j.vote_tally[v];
-          const total = Object.values(j.vote_tally).reduce((a,b)=>a+b,0);
-          const c = VOTE_CFG[v];
-          return (
-            <div key={v} className="flex items-center gap-2">
-              <span className={`text-[11px] font-bold w-9 ${c.text}`}>{v}</span>
-              <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                <div className={`h-full rounded-full transition-all duration-700 ${c.bar}`} style={{width:`${total>0?(n/total)*100:0}%`}} />
-              </div>
-              <span className="text-xs text-white/35">{n}/8</span>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Agreed / disagreed */}
-      {j.signal !== "HOLD" && (
-        <div className="grid grid-cols-2 gap-2">
-          <div className="bg-emerald-950/30 border border-emerald-500/15 rounded-lg p-2.5">
-            <div className="text-[10px] text-emerald-400 font-bold mb-1">✓ For ({j.agreed_agents.length})</div>
-            {j.agreed_agents.map(a => <div key={a} className="text-[10px] text-white/40 truncate">{a}</div>)}
-          </div>
-          <div className="bg-red-950/30 border border-red-500/15 rounded-lg p-2.5">
-            <div className="text-[10px] text-red-400 font-bold mb-1">✗ Against ({j.disagreed_agents.length})</div>
-            {j.disagreed_agents.map(a => <div key={a} className="text-[10px] text-white/40 truncate">{a}</div>)}
-          </div>
-        </div>
-      )}
-    </div>
+    <button onClick={onClick}
+      className={`px-3 py-1 text-xs font-semibold rounded transition-all ${active ? "bg-cyan-500 text-black" : "bg-slate-700 text-slate-300 hover:bg-slate-600"}`}>
+      {label}
+    </button>
   );
 }
 
-// ─── Chart ────────────────────────────────────────────────────────────────────
-function MainChart({ chartData, chartState, judgment, showEMA, showBB }: {
-  chartData: ChartData | null; chartState: ChartState;
-  judgment: Judgment | null; showEMA: boolean; showBB: boolean;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-
-  useEffect(() => () => { chartRef.current?.remove(); }, []);
-
-  useEffect(() => {
-    if (!containerRef.current || !chartData) return;
-    if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
-
-    const el = containerRef.current;
-    const chart = createChart(el, {
-      ...CHART_THEME,
-      width: el.clientWidth,
-      height: el.clientHeight,
-    } as any);
-    chartRef.current = chart;
-
-    // Candlestick
-    const cs = chart.addSeries(CandlestickSeries, {
-      upColor: "#22c55e", downColor: "#ef4444",
-      borderUpColor: "#22c55e", borderDownColor: "#ef4444",
-      wickUpColor: "#22c55e", wickDownColor: "#ef4444",
-    });
-    cs.setData(chartData.candles as any);
-
-    // EMA
-    if (showEMA) {
-      const e9 = chart.addSeries(LineSeries, { color:"#f59e0b", lineWidth:1, title:"EMA9", priceLineVisible:false });
-      e9.setData(chartData.indicators.ema9 as any);
-      const e21 = chart.addSeries(LineSeries, { color:"#3b82f6", lineWidth:1, title:"EMA21", priceLineVisible:false });
-      e21.setData(chartData.indicators.ema21 as any);
-      const e50 = chart.addSeries(LineSeries, { color:"#8b5cf6", lineWidth:1, lineStyle:2, title:"EMA50", priceLineVisible:false });
-      e50.setData(chartData.indicators.ema50 as any);
-    }
-
-    // Bollinger
-    if (showBB) {
-      const bbu = chart.addSeries(LineSeries, { color:"rgba(99,102,241,0.55)", lineWidth:1, lineStyle:1, title:"BB+", priceLineVisible:false });
-      bbu.setData(chartData.indicators.bb_upper as any);
-      const bbl = chart.addSeries(LineSeries, { color:"rgba(99,102,241,0.55)", lineWidth:1, lineStyle:1, title:"BB-", priceLineVisible:false });
-      bbl.setData(chartData.indicators.bb_lower as any);
-      const bbm = chart.addSeries(LineSeries, { color:"rgba(99,102,241,0.3)", lineWidth:1, lineStyle:2, title:"MA20", priceLineVisible:false });
-      bbm.setData(chartData.indicators.bb_mid as any);
-    }
-
-    // Price lines & markers
-    if (judgment && chartData.candles.length > 0) {
-      const last = chartData.candles[chartData.candles.length - 1];
-      const mColor = judgment.signal === "BUY" ? "#22c55e" : judgment.signal === "SELL" ? "#ef4444" : "#f59e0b";
-      createSeriesMarkers(cs, [{
-        time: last.time,
-        position: judgment.signal === "BUY" ? "belowBar" : judgment.signal === "SELL" ? "aboveBar" : "inBar",
-        color: mColor,
-        shape: judgment.signal === "BUY" ? "arrowUp" : judgment.signal === "SELL" ? "arrowDown" : "circle",
-        text: `${judgment.signal} ${fmt(judgment.confidence, 0)}%`,
-        size: 2,
-      }]);
-
-      if (judgment.signal !== "HOLD") {
-        cs.createPriceLine({ price: judgment.entry_price, color:"rgba(255,255,255,0.45)", lineWidth:1, lineStyle:2, axisLabelVisible:true, title:"Entry" });
-        cs.createPriceLine({ price: judgment.stop_loss, color:"#ef4444", lineWidth:1, lineStyle:2, axisLabelVisible:true, title:"Stop" });
-        cs.createPriceLine({ price: judgment.target_price, color:"#22c55e", lineWidth:1, lineStyle:2, axisLabelVisible:true, title:"Target" });
-      }
-    }
-
-    chart.timeScale().fitContent();
-
-    const obs = new ResizeObserver(() => { if (chartRef.current) chartRef.current.applyOptions({ width: el.clientWidth }); });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [chartData, showEMA, showBB, judgment]);
-
-  return (
-    <div className="w-full h-full relative rounded-xl overflow-hidden border border-white/6">
-      {chartState === "loading" && (
-        <div className="absolute inset-0 bg-[#08080d] flex items-center justify-center z-10">
-          <div className="flex flex-col items-center gap-3">
-            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-xs text-white/30">Loading chart data…</span>
-          </div>
-        </div>
-      )}
-      {chartState === "error" && (
-        <div className="absolute inset-0 bg-[#08080d] flex items-center justify-center z-10">
-          <p className="text-xs text-red-400">Chart load failed</p>
-        </div>
-      )}
-      <div ref={containerRef} className="w-full h-full" />
-    </div>
-  );
-}
-
-function SubChart({ data, active }: { data: ChartData; active: "volume" | "rsi" | "macd" }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-
-  useEffect(() => () => { chartRef.current?.remove(); }, []);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
-
-    const el = containerRef.current;
-    const chart = createChart(el, {
-      ...CHART_THEME,
-      width: el.clientWidth,
-      height: el.clientHeight,
-    } as any);
-    chartRef.current = chart;
-
-    if (active === "volume") {
-      const s = chart.addSeries(HistogramSeries, { color:"rgba(59,130,246,0.5)", priceFormat:{ type:"volume" } });
-      s.setData(data.indicators.volume.map(d => ({ ...d, color: "rgba(59,130,246,0.5)" })) as any);
-    } else if (active === "rsi") {
-      const s = chart.addSeries(LineSeries, { color:"#f59e0b", lineWidth:2, title:"RSI" });
-      s.setData(data.indicators.rsi as any);
-      const ob = chart.addSeries(LineSeries, { color:"rgba(239,68,68,0.35)", lineWidth:1, lineStyle:2, priceLineVisible:false });
-      ob.setData(data.indicators.rsi.map(d => ({...d, value:70})) as any);
-      const os = chart.addSeries(LineSeries, { color:"rgba(34,197,94,0.35)", lineWidth:1, lineStyle:2, priceLineVisible:false });
-      os.setData(data.indicators.rsi.map(d => ({...d, value:30})) as any);
-    } else {
-      const ml = chart.addSeries(LineSeries, { color:"#3b82f6", lineWidth:2, title:"MACD" });
-      ml.setData(data.indicators.macd_line as any);
-      const sl = chart.addSeries(LineSeries, { color:"#f59e0b", lineWidth:1, title:"Signal" });
-      sl.setData(data.indicators.macd_signal as any);
-      const hs = chart.addSeries(HistogramSeries, { title:"Hist", priceFormat:{ type:"price", precision:4, minMove:0.0001 } });
-      hs.setData(data.indicators.macd_hist.map(d => ({ ...d, color: d.value >= 0 ? "rgba(34,197,94,0.6)" : "rgba(239,68,68,0.6)" })) as any);
-    }
-
-    chart.timeScale().fitContent();
-    const obs = new ResizeObserver(() => { if (chartRef.current) chartRef.current.applyOptions({ width: el.clientWidth }); });
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, [data, active]);
-
-  return <div ref={containerRef} className="w-full h-full rounded-xl overflow-hidden border border-white/6" />;
-}
-
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Main Component ───────────────────────────────────────────────────────────
 export default function TradingDashboard() {
-  const [inputVal, setInputVal] = useState("AAPL");
-  const [currentSym, setCurrentSym] = useState("");
-  const [analysisState, setAnalysisState] = useState<AnalysisState>("idle");
-  const [chartState, setChartState] = useState<ChartState>("idle");
-  const [ticker, setTicker] = useState<TickerData | null>(null);
+  const [symbol, setSymbol] = useState("AAPL");
+  const [inputSym, setInputSym] = useState("AAPL");
+  const [status, setStatus] = useState("");
   const [votes, setVotes] = useState<AgentVote[]>([]);
   const [judgment, setJudgment] = useState<Judgment | null>(null);
-  const [chartData, setChartData] = useState<ChartData | null>(null);
-  const [error, setError] = useState("");
-  const [tab, setTab] = useState<"chart"|"agents"|"history">("chart");
-  const [showEMA, setShowEMA] = useState(true);
+  const [indicators, setIndicators] = useState<Indicators>({});
+  const [livePrice, setLivePrice] = useState<LivePrice | null>(null);
+  const [running, setRunning] = useState(false);
+  const [activeTab, setActiveTab] = useState<"chart" | "agents" | "options" | "news" | "history">("chart");
+  const [activeBottom, setActiveBottom] = useState<"volume" | "rsi" | "macd">("volume");
+  const [period, setPeriod] = useState("3mo");
+  const [showEma, setShowEma] = useState(true);
   const [showBB, setShowBB] = useState(false);
-  const [bottomPanel, setBottomPanel] = useState<"volume"|"rsi"|"macd">("volume");
+  const [showVwap, setShowVwap] = useState(true);
+  const [showST, setShowST] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
+  const [newVoteIndex, setNewVoteIndex] = useState(-1);
+
+  // Chart refs
+  const mainChartRef = useRef<HTMLDivElement>(null);
+  const bottomChartRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const bottomChartObjRef = useRef<IChartApi | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const forecastRef = useRef<any>(null);
+  const targetLineRef = useRef<any>(null);
+  const stopLineRef = useRef<any>(null);
+  const seriesRefs = useRef<Record<string, any>>({});
 
-  const loadChart = useCallback(async (sym: string) => {
-    setChartState("loading");
-    setChartData(null);
-    try {
-      const r = await fetch(`${API_BASE}/chart/${sym}`);
-      if (!r.ok) throw new Error("chart error");
-      setChartData(await r.json());
-      setChartState("ready");
-    } catch { setChartState("error"); }
-  }, []);
+  // ── Chart Setup ──────────────────────────────────────────────────────────
+  const initCharts = useCallback(() => {
+    if (!mainChartRef.current || !bottomChartRef.current) return;
+    if (chartRef.current) { chartRef.current.remove(); chartRef.current = null; }
+    if (bottomChartObjRef.current) { bottomChartObjRef.current.remove(); bottomChartObjRef.current = null; }
+    seriesRefs.current = {};
 
-  const loadHistory = useCallback(async (sym: string) => {
-    try {
-      const r = await fetch(`${API_BASE}/learning/history/${sym}`);
-      if (r.ok) { const d = await r.json(); setHistory(d.predictions || []); }
-    } catch {}
-  }, []);
-
-  const runAnalysis = useCallback((sym: string) => {
-    const s = sym.trim().toUpperCase();
-    if (!s) return;
-    wsRef.current?.close();
-    setVotes([]); setJudgment(null); setError(""); setTicker(null);
-    setCurrentSym(s); setAnalysisState("connecting");
-
-    loadChart(s);
-
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${window.location.host}${API_BASE}/ws/analyze/${s}`);
-    wsRef.current = ws;
-    ws.onopen = () => setAnalysisState("streaming");
-    ws.onmessage = e => {
-      const m = JSON.parse(e.data);
-      if (m.type === "ticker") setTicker(m.data);
-      else if (m.type === "agent_vote") setVotes(p => [...p, m.data]);
-      else if (m.type === "judgment") { setJudgment(m.data); loadHistory(s); }
-      else if (m.type === "complete") setAnalysisState("complete");
-      else if (m.type === "error") { setError(m.message); setAnalysisState("error"); }
+    const opts = {
+      layout: { background: { type: ColorType.Solid, color: "#0f172a" }, textColor: "#94a3b8" },
+      grid: { vertLines: { color: "#1e293b" }, horzLines: { color: "#1e293b" } },
+      crosshair: { mode: CrosshairMode.Normal },
+      rightPriceScale: { borderColor: "#1e293b" },
+      timeScale: { borderColor: "#1e293b", timeVisible: true },
     };
-    ws.onerror = () => { setError("WebSocket error — backend may be loading, try again"); setAnalysisState("error"); };
-    ws.onclose = () => { if (wsRef.current === ws) wsRef.current = null; };
-  }, [loadChart, loadHistory]);
 
-  useEffect(() => () => wsRef.current?.close(), []);
+    const main = createChart(mainChartRef.current, { ...opts, height: 380 });
+    const bottom = createChart(bottomChartRef.current, { ...opts, height: 120 });
 
-  const submit = (e: React.FormEvent) => { e.preventDefault(); runAnalysis(inputVal); };
-  const isRunning = analysisState === "connecting" || analysisState === "streaming";
-  const active = analysisState === "streaming" || analysisState === "complete";
+    // Sync time scales
+    main.timeScale().subscribeVisibleLogicalRangeChange((r) => {
+      if (r) bottom.timeScale().setVisibleLogicalRange(r);
+    });
+    bottom.timeScale().subscribeVisibleLogicalRangeChange((r) => {
+      if (r) main.timeScale().setVisibleLogicalRange(r);
+    });
+
+    chartRef.current = main;
+    bottomChartObjRef.current = bottom;
+  }, []);
+
+  // ── Load Chart Data ──────────────────────────────────────────────────────
+  const loadChart = useCallback(async (sym: string, p: string) => {
+    if (!chartRef.current || !bottomChartObjRef.current) return;
+    const main = chartRef.current;
+    const bottom = bottomChartObjRef.current;
+
+    // Remove old series
+    Object.values(seriesRefs.current).forEach(s => {
+      try { main.removeSeries(s); } catch (_) {}
+      try { bottom.removeSeries(s); } catch (_) {}
+    });
+    seriesRefs.current = {};
+    forecastRef.current = null;
+    targetLineRef.current = null;
+    stopLineRef.current = null;
+
+    try {
+      const interval = { "1d": "5m", "5d": "15m", "1mo": "1d", "3mo": "1d", "6mo": "1d" }[p] || "1d";
+      const res = await fetch(`${API_BASE}/chart/${sym}?period=${p}&interval=${interval}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.error || !data.candles?.length) return;
+
+      const toTS = (t: number) => t as UTCTimestamp;
+
+      // Candlestick
+      const candleSeries = main.addSeries(CandlestickSeries, {
+        upColor: "#26a69a", downColor: "#ef5350",
+        borderUpColor: "#26a69a", borderDownColor: "#ef5350",
+        wickUpColor: "#26a69a", wickDownColor: "#ef5350",
+      });
+      candleSeries.setData(data.candles.map((c: any) => ({ ...c, time: toTS(c.time) })));
+      seriesRefs.current.candle = candleSeries;
+
+      // EMA 9
+      if (showEma && data.ema?.length) {
+        const e9 = main.addSeries(LineSeries, { color: "#f59e0b", lineWidth: 1, lineStyle: 0, crosshairMarkerVisible: false });
+        const e21 = main.addSeries(LineSeries, { color: "#3b82f6", lineWidth: 1, lineStyle: 0, crosshairMarkerVisible: false });
+        const e50 = main.addSeries(LineSeries, { color: "#8b5cf6", lineWidth: 1, lineStyle: 0, crosshairMarkerVisible: false });
+        e9.setData(data.ema.filter((d: any) => d.ema9 != null).map((d: any) => ({ time: toTS(d.time), value: d.ema9 })));
+        e21.setData(data.ema.filter((d: any) => d.ema21 != null).map((d: any) => ({ time: toTS(d.time), value: d.ema21 })));
+        e50.setData(data.ema.filter((d: any) => d.ema50 != null).map((d: any) => ({ time: toTS(d.time), value: d.ema50 })));
+        seriesRefs.current.e9 = e9; seriesRefs.current.e21 = e21; seriesRefs.current.e50 = e50;
+      }
+
+      // Bollinger Bands
+      if (showBB && data.bb?.length) {
+        const bbU = main.addSeries(LineSeries, { color: "rgba(99,102,241,0.6)", lineWidth: 1, lineStyle: 2, crosshairMarkerVisible: false });
+        const bbM = main.addSeries(LineSeries, { color: "rgba(99,102,241,0.4)", lineWidth: 1, lineStyle: 1, crosshairMarkerVisible: false });
+        const bbL = main.addSeries(LineSeries, { color: "rgba(99,102,241,0.6)", lineWidth: 1, lineStyle: 2, crosshairMarkerVisible: false });
+        const bbFilter = (key: string) => data.bb.filter((d: any) => d[key] != null).map((d: any) => ({ time: toTS(d.time), value: d[key] }));
+        bbU.setData(bbFilter("upper")); bbM.setData(bbFilter("mid")); bbL.setData(bbFilter("lower"));
+        seriesRefs.current.bbU = bbU; seriesRefs.current.bbM = bbM; seriesRefs.current.bbL = bbL;
+      }
+
+      // VWAP
+      if (showVwap && data.vwap?.length) {
+        const vwapS = main.addSeries(LineSeries, { color: "#f97316", lineWidth: 2, lineStyle: 1, crosshairMarkerVisible: false });
+        vwapS.setData(data.vwap.filter((d: any) => d.value != null).map((d: any) => ({ time: toTS(d.time), value: d.value })));
+        seriesRefs.current.vwap = vwapS;
+      }
+
+      // SuperTrend
+      if (showST && data.supertrend?.length) {
+        const stBull = main.addSeries(LineSeries, { color: "#10b981", lineWidth: 2, crosshairMarkerVisible: false });
+        const stBear = main.addSeries(LineSeries, { color: "#ef4444", lineWidth: 2, crosshairMarkerVisible: false });
+        const stBullData = data.supertrend.filter((d: any) => d.direction === "up").map((d: any) => ({ time: toTS(d.time), value: d.value }));
+        const stBearData = data.supertrend.filter((d: any) => d.direction === "down").map((d: any) => ({ time: toTS(d.time), value: d.value }));
+        if (stBullData.length) stBull.setData(stBullData);
+        if (stBearData.length) stBear.setData(stBearData);
+        seriesRefs.current.stBull = stBull; seriesRefs.current.stBear = stBear;
+      }
+
+      // Bottom panel
+      if (activeBottom === "volume" && data.volume?.length) {
+        const volS = bottom.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "volume" });
+        volS.setData(data.volume.map((d: any) => ({ time: toTS(d.time), value: d.value, color: d.color })));
+        seriesRefs.current.vol = volS;
+      } else if (activeBottom === "rsi" && data.rsi?.length) {
+        const rsiS = bottom.addSeries(LineSeries, { color: "#a78bfa", lineWidth: 1 });
+        rsiS.setData(data.rsi.map((d: any) => ({ time: toTS(d.time), value: d.value })));
+        // OB/OS lines
+        const rsiLast = data.rsi[data.rsi.length - 1];
+        if (rsiLast) {
+          const ob = bottom.addSeries(LineSeries, { color: "rgba(239,68,68,0.4)", lineWidth: 1, lineStyle: 2, crosshairMarkerVisible: false });
+          const os = bottom.addSeries(LineSeries, { color: "rgba(16,185,129,0.4)", lineWidth: 1, lineStyle: 2, crosshairMarkerVisible: false });
+          ob.setData([{ time: toTS(data.rsi[0].time), value: 70 }, { time: toTS(rsiLast.time), value: 70 }]);
+          os.setData([{ time: toTS(data.rsi[0].time), value: 30 }, { time: toTS(rsiLast.time), value: 30 }]);
+          seriesRefs.current.ob = ob; seriesRefs.current.os = os;
+        }
+        seriesRefs.current.rsi = rsiS;
+      } else if (activeBottom === "macd" && data.macd?.length) {
+        const macdLine = bottom.addSeries(LineSeries, { color: "#38bdf8", lineWidth: 1 });
+        const sigLine = bottom.addSeries(LineSeries, { color: "#f97316", lineWidth: 1 });
+        const macdHist = bottom.addSeries(HistogramSeries, {});
+        macdLine.setData(data.macd.map((d: any) => ({ time: toTS(d.time), value: d.macd })));
+        sigLine.setData(data.macd.map((d: any) => ({ time: toTS(d.time), value: d.signal })));
+        macdHist.setData(data.macd.map((d: any) => ({ time: toTS(d.time), value: d.hist, color: d.hist >= 0 ? "#26a69a88" : "#ef535088" })));
+        seriesRefs.current.macdLine = macdLine; seriesRefs.current.sigLine = sigLine; seriesRefs.current.macdHist = macdHist;
+      }
+
+      main.timeScale().fitContent();
+      bottom.timeScale().fitContent();
+    } catch (e) {
+      console.error("Chart load error", e);
+    }
+  }, [showEma, showBB, showVwap, showST, activeBottom]);
+
+  // ── Draw Prediction on Chart ──────────────────────────────────────────────
+  const drawPrediction = useCallback((j: Judgment) => {
+    const main = chartRef.current;
+    if (!main || !j.forecast_line?.length) return;
+
+    // Remove old forecast series
+    if (forecastRef.current) { try { main.removeSeries(forecastRef.current); } catch (_) {} }
+    if (targetLineRef.current) { try { main.removeSeries(targetLineRef.current); } catch (_) {} }
+    if (stopLineRef.current) { try { main.removeSeries(stopLineRef.current); } catch (_) {} }
+
+    const toTS = (t: number) => t as UTCTimestamp;
+    const isCall = j.signal === "BUY_CALL";
+    const isPut = j.signal === "BUY_PUT";
+
+    if (j.signal !== "HOLD" && j.forecast_line.length > 0) {
+      // Prediction path line — dotted, CALL=green PUT=red
+      const predSeries = main.addSeries(LineSeries, {
+        color: isCall ? "#10b981" : "#ef4444",
+        lineWidth: 2,
+        lineStyle: 2, // dashed
+        crosshairMarkerVisible: true,
+        lastValueVisible: true,
+        title: "PREDICTION",
+      });
+
+      // Start from entry price, project to forecast
+      const forecastData = [
+        { time: toTS(j.forecast_line[0].time - 86400), value: j.entry_price },
+        ...j.forecast_line.map(p => ({ time: toTS(p.time), value: p.value })),
+      ];
+      predSeries.setData(forecastData);
+      forecastRef.current = predSeries;
+
+      // Target line (horizontal)
+      const targetS = main.addSeries(LineSeries, {
+        color: isCall ? "rgba(16,185,129,0.7)" : "rgba(239,68,68,0.7)",
+        lineWidth: 1, lineStyle: 3,
+        crosshairMarkerVisible: false,
+        lastValueVisible: true,
+        title: `TARGET $${j.target_price}`,
+      });
+      const lastForecastTime = j.forecast_line[j.forecast_line.length - 1].time;
+      targetS.setData([
+        { time: toTS(j.forecast_line[0].time - 86400), value: j.target_price },
+        { time: toTS(lastForecastTime), value: j.target_price },
+      ]);
+      targetLineRef.current = targetS;
+
+      // Stop line
+      const stopS = main.addSeries(LineSeries, {
+        color: isPut ? "rgba(16,185,129,0.7)" : "rgba(239,68,68,0.7)",
+        lineWidth: 1, lineStyle: 3,
+        crosshairMarkerVisible: false,
+        lastValueVisible: true,
+        title: `STOP $${j.stop_loss}`,
+      });
+      stopS.setData([
+        { time: toTS(j.forecast_line[0].time - 86400), value: j.stop_loss },
+        { time: toTS(lastForecastTime), value: j.stop_loss },
+      ]);
+      stopLineRef.current = stopS;
+
+      // Entry marker
+      try {
+        createSeriesMarkers(seriesRefs.current.candle || predSeries, [{
+          time: toTS(j.forecast_line[0].time - 86400),
+          position: isCall ? "belowBar" : "aboveBar",
+          color: isCall ? "#10b981" : "#ef4444",
+          shape: isCall ? "arrowUp" : "arrowDown",
+          text: isCall ? `⬆ CALL @$${j.entry_price}` : `⬇ PUT @$${j.entry_price}`,
+          size: 2,
+        }]);
+      } catch (_) {}
+    }
+  }, []);
+
+  // ── WebSocket Analysis ──────────────────────────────────────────────────
+  const runAnalysis = useCallback((sym: string) => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setVotes([]);
+    setJudgment(null);
+    setStatus("🔌 Connecting...");
+    setRunning(true);
+
+    const ws = new WebSocket(`${WS_BASE}/api/ws/analyze/${sym}`);
+    wsRef.current = ws;
+
+    ws.onopen = () => setStatus("🔍 Connected — fetching live data...");
+
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "status") {
+          setStatus(msg.message);
+        } else if (msg.type === "live_price") {
+          setLivePrice(msg);
+        } else if (msg.type === "agent_vote") {
+          setVotes(prev => {
+            const updated = [...prev, msg.vote];
+            setNewVoteIndex(updated.length - 1);
+            setTimeout(() => setNewVoteIndex(-1), 800);
+            return updated;
+          });
+        } else if (msg.type === "judgment") {
+          setJudgment(msg.judgment);
+          setIndicators(msg.indicators || {});
+          setRunning(false);
+          setStatus("✅ Analysis complete");
+          // Draw forecast on chart
+          setTimeout(() => drawPrediction(msg.judgment), 200);
+        } else if (msg.type === "error") {
+          setStatus(`❌ ${msg.message}`);
+          setRunning(false);
+        }
+      } catch (e) {
+        console.error("WS parse error", e);
+      }
+    };
+
+    ws.onerror = () => { setStatus("❌ Connection error"); setRunning(false); };
+    ws.onclose = () => { if (running) setStatus("⚠️ Disconnected"); };
+
+    // Keep-alive ping
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+    }, 8000);
+    ws.addEventListener("close", () => clearInterval(pingInterval));
+  }, [drawPrediction]);
+
+  // ── Effects ──────────────────────────────────────────────────────────────
+  useEffect(() => {
+    initCharts();
+    return () => {
+      chartRef.current?.remove();
+      bottomChartObjRef.current?.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (chartRef.current) {
+      loadChart(symbol, period);
+    }
+  }, [symbol, period, showEma, showBB, showVwap, showST, activeBottom]);
+
+  // Reload chart when judgment comes in (to redraw everything cleanly)
+  useEffect(() => {
+    if (judgment && chartRef.current) {
+      loadChart(symbol, period).then(() => drawPrediction(judgment));
+    }
+  }, [judgment]);
+
+  // Load history
+  useEffect(() => {
+    if (activeTab === "history") {
+      fetch(`${API_BASE}/learning/history/${symbol}`)
+        .then(r => r.json()).then(d => setHistory(d.history || [])).catch(() => {});
+    }
+  }, [activeTab, symbol]);
+
+  const handleAnalyze = () => {
+    const sym = inputSym.trim().toUpperCase();
+    if (!sym) return;
+    setSymbol(sym);
+    setActiveTab("chart");
+    runAnalysis(sym);
+  };
+
+  const fmtPrice = (p?: number) => p != null ? `$${p.toFixed(2)}` : "--";
+  const fmtPct = (p?: number) => p != null ? `${p > 0 ? "+" : ""}${p.toFixed(2)}%` : "--";
+
+  const rr = judgment ? Math.abs(judgment.target_price - judgment.entry_price) /
+    Math.abs(judgment.stop_loss - judgment.entry_price) : 0;
 
   return (
-    <div className="h-screen bg-[#08080d] text-white flex flex-col overflow-hidden" style={{fontFamily:"system-ui,-apple-system,sans-serif"}}>
-      {/* Header */}
-      <header className="flex-none border-b border-white/6 bg-[#0c0c14]/90 backdrop-blur px-4 py-2">
-        <div className="flex items-center gap-3">
-          {/* Brand */}
-          <div className="flex items-center gap-2 shrink-0">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-blue-600 to-violet-700 flex items-center justify-center shadow-lg shadow-blue-900/40">
-              <span className="text-xs font-black">T</span>
+    <div className="min-h-screen bg-[#0a0f1e] text-slate-100 font-mono">
+      {/* ── Top Bar ── */}
+      <div className="border-b border-slate-800 bg-[#0d1629] px-4 py-2 flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-sm font-black">T</div>
+          <div>
+            <div className="text-sm font-black text-white">TradeSignal AI</div>
+            <div className="text-[9px] text-slate-500">8-AGENT · CALL/PUT · REAL-TIME</div>
+          </div>
+        </div>
+
+        {/* Symbol input */}
+        <div className="flex gap-2 flex-1 min-w-[200px]">
+          <input
+            className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white w-32 uppercase focus:border-cyan-500 outline-none"
+            value={inputSym}
+            onChange={e => setInputSym(e.target.value.toUpperCase())}
+            onKeyDown={e => e.key === "Enter" && handleAnalyze()}
+            placeholder="SYMBOL"
+          />
+          <button onClick={handleAnalyze}
+            disabled={running}
+            className={`px-4 py-1.5 rounded-lg text-sm font-bold transition-all ${running ? "bg-slate-700 text-slate-500 cursor-not-allowed" : "bg-cyan-500 hover:bg-cyan-400 text-black"}`}>
+            {running ? "⏳" : "Analyze"}
+          </button>
+        </div>
+
+        {/* Quick symbols */}
+        <div className="flex gap-1.5 flex-wrap">
+          {["AAPL","NVDA","TSLA","MSFT","SPY","QQQ","AMZN","META","AMD","COIN"].map(s => (
+            <button key={s} onClick={() => { setInputSym(s); setSymbol(s); runAnalysis(s); }}
+              className={`px-2 py-1 rounded text-xs font-bold transition-all border ${s === symbol ? "border-cyan-500 bg-cyan-500/20 text-cyan-300" : "border-slate-600 text-slate-400 hover:border-slate-400 hover:text-white"}`}>
+              {s}
+            </button>
+          ))}
+        </div>
+
+        {/* Live price */}
+        {livePrice && (
+          <div className="ml-auto flex items-center gap-3 text-right">
+            <div>
+              <div className="text-xl font-black text-white">{fmtPrice(livePrice.price)}</div>
+              <div className={`text-xs font-bold ${livePrice.change_pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                {fmtPct(livePrice.change_pct)} · {livePrice.market_state}
+                <span className="ml-2 inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              </div>
             </div>
-            <div className="leading-none">
-              <div className="text-sm font-bold">TradeSignal AI</div>
-              <div className="text-[9px] text-white/30 tracking-widest">8-AGENT CONSENSUS</div>
+          </div>
+        )}
+      </div>
+
+      {/* ── Status Bar ── */}
+      {status && (
+        <div className="px-4 py-1.5 bg-slate-900 border-b border-slate-800 text-xs text-cyan-400 font-mono flex items-center gap-2">
+          {running && <span className="inline-block w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />}
+          {status}
+        </div>
+      )}
+
+      <div className="flex h-[calc(100vh-88px)]">
+        {/* ── Left Panel: Chart + Bottom ── */}
+        <div className="flex-1 min-w-0 flex flex-col border-r border-slate-800">
+          {/* Chart Controls */}
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-slate-800 bg-[#0d1629] flex-wrap">
+            {/* Period */}
+            <div className="flex gap-1">
+              {[["1d","1D"],["5d","5D"],["1mo","1M"],["3mo","3M"],["6mo","6M"]].map(([p,l]) => (
+                <PeriodBtn key={p} label={l} active={period === p} onClick={() => setPeriod(p)} />
+              ))}
+            </div>
+            <div className="w-px h-4 bg-slate-700" />
+            {/* Overlays */}
+            {[
+              ["EMA", showEma, () => setShowEma(v => !v)],
+              ["BB", showBB, () => setShowBB(v => !v)],
+              ["VWAP", showVwap, () => setShowVwap(v => !v)],
+              ["ST", showST, () => setShowST(v => !v)],
+            ].map(([lbl, active, fn]) => (
+              <button key={lbl as string} onClick={fn as any}
+                className={`px-2 py-0.5 text-[10px] rounded border transition-all ${active ? "border-cyan-500 text-cyan-400 bg-cyan-500/10" : "border-slate-600 text-slate-500"}`}>
+                {lbl as string}
+              </button>
+            ))}
+            <div className="ml-auto flex gap-1">
+              {([["volume","VOL"],["rsi","RSI"],["macd","MACD"]] as const).map(([k,l]) => (
+                <PeriodBtn key={k} label={l} active={activeBottom === k} onClick={() => setActiveBottom(k)} />
+              ))}
             </div>
           </div>
 
-          {/* Search */}
-          <form onSubmit={submit} className="flex gap-2 max-w-xs flex-1">
-            <input
-              className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm font-mono uppercase tracking-wide
-                         placeholder-white/20 focus:outline-none focus:border-blue-500/50 transition-colors"
-              value={inputVal} onChange={e => setInputVal(e.target.value.toUpperCase())}
-              placeholder="AAPL, TSLA, BTC-USD…"
-            />
-            <button type="submit" disabled={isRunning}
-              className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white text-sm font-semibold px-4 rounded-lg transition-all">
-              {isRunning ? "…" : "Analyze"}
-            </button>
-          </form>
+          {/* Main Chart */}
+          <div ref={mainChartRef} className="w-full" style={{ height: 380 }} />
 
-          {/* Quick picks */}
-          <div className="flex gap-1 overflow-x-auto" style={{scrollbarWidth:"none"}}>
-            {POPULAR.map(s => (
-              <button key={s} onClick={() => { setInputVal(s); runAnalysis(s); }}
-                className={`text-[11px] px-2.5 py-1 rounded-md font-mono whitespace-nowrap border transition-all
-                  ${s === currentSym
-                    ? "bg-blue-600/25 border-blue-500/45 text-blue-300"
-                    : "border-white/8 text-white/38 hover:border-white/18 hover:text-white/65"}`}>
-                {s}
+          {/* Bottom Chart */}
+          <div className="border-t border-slate-800 px-2 pt-1">
+            <div className="text-[9px] text-slate-500 uppercase tracking-wider mb-0.5">
+              {activeBottom === "volume" ? "Volume" : activeBottom === "rsi" ? "RSI (14) — OB:70 / OS:30" : "MACD (12/26/9)"}
+            </div>
+          </div>
+          <div ref={bottomChartRef} className="w-full" style={{ height: 120 }} />
+
+          {/* Legend */}
+          <div className="px-3 py-1.5 border-t border-slate-800 bg-[#0d1629] flex gap-3 flex-wrap text-[10px]">
+            {showEma && (<>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-amber-400 inline-block" /> EMA9</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-blue-400 inline-block" /> EMA21</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-violet-400 inline-block" /> EMA50</span>
+            </>)}
+            {showVwap && <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-orange-400 inline-block" style={{borderTop: "1px dashed"}} /> VWAP</span>}
+            {showST && <>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-emerald-400 inline-block" /> ST Bull</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-400 inline-block" /> ST Bear</span>
+            </>}
+            {judgment && judgment.signal !== "HOLD" && (
+              <>
+                <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{borderTop: `2px dashed ${judgment.signal === "BUY_CALL" ? "#10b981" : "#ef4444"}`}} /> PREDICTION</span>
+                <span className="text-emerald-400">▶ TARGET ${judgment.target_price.toFixed(2)}</span>
+                <span className="text-red-400">◀ STOP ${judgment.stop_loss.toFixed(2)}</span>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* ── Right Panel ── */}
+        <div className="w-[380px] flex flex-col overflow-hidden bg-[#0d1629]">
+          {/* Tab Bar */}
+          <div className="flex border-b border-slate-800">
+            {(["chart","agents","options","news","history"] as const).map(t => (
+              <button key={t} onClick={() => setActiveTab(t)}
+                className={`flex-1 py-2 text-[10px] font-bold uppercase tracking-wider transition-all ${activeTab === t ? "text-cyan-400 border-b-2 border-cyan-400 bg-cyan-500/5" : "text-slate-500 hover:text-slate-300"}`}>
+                {t === "agents" ? `Agents${votes.length ? ` (${votes.length}/7)` : ""}` : t === "chart" ? "Signal" : t}
               </button>
             ))}
           </div>
 
-          {isRunning && (
-            <div className="flex items-center gap-1.5 ml-auto shrink-0">
-              <PulsingDot /><span className="text-xs text-blue-400">LIVE</span>
-            </div>
-          )}
-        </div>
-      </header>
+          <div className="flex-1 overflow-y-auto p-3 space-y-3">
+            {/* ── SIGNAL TAB ── */}
+            {activeTab === "chart" && (
+              <div className="space-y-3">
+                {!judgment && !running && (
+                  <div className="text-center py-16 text-slate-600">
+                    <div className="text-4xl mb-3">📊</div>
+                    <div className="text-sm">Enter a symbol and click Analyze</div>
+                    <div className="text-xs mt-1">8 agents will vote CALL / PUT / HOLD</div>
+                    <div className="text-xs text-slate-700 mt-2">6 of 7 must agree to fire a signal</div>
+                  </div>
+                )}
+                {running && !judgment && (
+                  <div className="text-center py-8">
+                    <div className="text-3xl animate-spin mb-3 inline-block">⚙️</div>
+                    <div className="text-sm text-cyan-400">{status}</div>
+                    <div className="mt-4 space-y-1">
+                      {votes.map((v, i) => (
+                        <div key={i} className="flex items-center justify-between text-xs px-2 py-1 bg-slate-800 rounded">
+                          <span>{v.emoji} {v.agent}</span>
+                          <SignalBadge signal={v.vote} size="sm" />
+                          <span className="text-slate-400">{v.confidence.toFixed(0)}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {judgment && (
+                  <>
+                    {/* Big Signal */}
+                    <div className={`rounded-2xl border-2 p-4 text-center ${signalStyle(judgment.signal).border} ${signalStyle(judgment.signal).bg}`}>
+                      <div className="relative w-24 h-24 mx-auto mb-3">
+                        <ConfRing pct={judgment.confidence} signal={judgment.signal} />
+                        <div className="absolute inset-0 flex flex-col items-center justify-center">
+                          <div className={`text-2xl font-black ${signalStyle(judgment.signal).text}`}>
+                            {judgment.confidence.toFixed(0)}%
+                          </div>
+                          <div className="text-[9px] text-slate-500">CONF</div>
+                        </div>
+                      </div>
+                      <SignalBadge signal={judgment.signal} size="lg" />
+                      <div className="mt-2 text-xs text-slate-400">{judgment.judge_reason}</div>
+                    </div>
 
-      {/* Ticker bar */}
-      {ticker && (
-        <div className="flex-none border-b border-white/5 bg-[#0d0d17]/60 px-4 py-2">
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-            <div className="flex items-baseline gap-2">
-              <span className="font-black font-mono text-lg">{ticker.symbol}</span>
-              <span className="text-white/35 text-xs truncate max-w-[160px]">{ticker.company_name}</span>
-            </div>
-            <div className="flex items-baseline gap-2">
-              <span className="font-mono text-xl font-bold">${fmt(ticker.price)}</span>
-              <span className={`text-sm font-semibold ${ticker.change_pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                {ticker.change_pct >= 0 ? "+" : ""}{fmt(ticker.change_pct)}%
-              </span>
-            </div>
-            {[
-              {l:"Vol",v:fmtK(ticker.volume)},
-              {l:"Avg",v:fmtK(ticker.avg_volume)},
-              ticker.week_52_high > 0 ? {l:"52W H",v:`$${fmt(ticker.week_52_high)}`} : null,
-              ticker.week_52_low > 0 ? {l:"52W L",v:`$${fmt(ticker.week_52_low)}`} : null,
-              ticker.sector ? {l:"Sector",v:ticker.sector} : null,
-            ].filter(Boolean).map(({l,v}: any) => (
-              <span key={l} className="text-xs"><span className="text-white/30">{l} </span><span className="text-white/55">{v}</span></span>
-            ))}
-            {/* 52-week range bar */}
-            {ticker.week_52_high > 0 && ticker.week_52_low > 0 && (
-              <div className="ml-auto flex items-center gap-2">
-                <span className="text-[10px] text-white/25">52W Range</span>
-                <div className="w-20 h-1.5 bg-white/8 rounded-full overflow-hidden">
-                  <div className="h-full rounded-full bg-gradient-to-r from-red-500 via-amber-400 to-emerald-400 transition-all duration-700"
-                    style={{ width: `${Math.min(100, Math.max(0, ((ticker.price - ticker.week_52_low) / (ticker.week_52_high - ticker.week_52_low)) * 100))}%` }} />
+                    {/* Vote Tally */}
+                    <div className="grid grid-cols-3 gap-2 text-center">
+                      {[
+                        ["⬆ CALL", judgment.vote_tally.BUY_CALL, "text-emerald-400 bg-emerald-500/10 border-emerald-700"],
+                        ["⬇ PUT", judgment.vote_tally.BUY_PUT, "text-red-400 bg-red-500/10 border-red-700"],
+                        ["⏸ HOLD", judgment.vote_tally.HOLD, "text-slate-400 bg-slate-500/10 border-slate-700"],
+                      ].map(([lbl, val, cls]) => (
+                        <div key={lbl as string} className={`rounded-lg border p-2 ${cls}`}>
+                          <div className="text-lg font-black">{val}</div>
+                          <div className="text-[10px]">{lbl}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Price Levels */}
+                    <div className="bg-slate-800/50 rounded-xl p-3 space-y-2">
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider">Price Levels</div>
+                      {[
+                        ["Entry", fmtPrice(judgment.entry_price), "text-white"],
+                        ["Target", fmtPrice(judgment.target_price), "text-emerald-400"],
+                        ["Stop", fmtPrice(judgment.stop_loss), "text-red-400"],
+                        ["R/R Ratio", rr > 0 ? `${rr.toFixed(1)}:1` : "—", rr >= 2 ? "text-emerald-400" : "text-amber-400"],
+                        ["Position", `${judgment.position_size_pct}% of portfolio`, "text-cyan-400"],
+                      ].map(([lbl, val, cls]) => (
+                        <div key={lbl as string} className="flex justify-between items-center">
+                          <span className="text-xs text-slate-400">{lbl}</span>
+                          <span className={`text-sm font-bold font-mono ${cls}`}>{val}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Key Indicators */}
+                    <div className="bg-slate-800/50 rounded-xl p-3 space-y-2">
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider">Key Indicators</div>
+                      {[
+                        ["RSI 14", indicators.rsi14?.toFixed(1), indicators.rsi14 != null ? (indicators.rsi14 > 70 ? "text-red-400" : indicators.rsi14 < 30 ? "text-emerald-400" : "text-white") : "text-white"],
+                        ["Stochastic", indicators.stoch_k?.toFixed(1), indicators.stoch_k != null ? (indicators.stoch_k > 80 ? "text-red-400" : indicators.stoch_k < 20 ? "text-emerald-400" : "text-white") : "text-white"],
+                        ["SuperTrend", indicators.supertrend_dir || "—", indicators.supertrend_dir === "up" ? "text-emerald-400" : "text-red-400"],
+                        ["VWAP dist", indicators.price_vs_vwap_pct != null ? `${indicators.price_vs_vwap_pct > 0 ? "+" : ""}${indicators.price_vs_vwap_pct?.toFixed(2)}%` : "—", (indicators.price_vs_vwap_pct ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"],
+                        ["OBV slope", indicators.obv_slope_10d_pct != null ? `${indicators.obv_slope_10d_pct > 0 ? "+" : ""}${indicators.obv_slope_10d_pct?.toFixed(1)}%` : "—", (indicators.obv_slope_10d_pct ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"],
+                        ["Rel Volume", indicators.rel_volume?.toFixed(2) + "×", (indicators.rel_volume ?? 1) > 1.5 ? "text-amber-400" : "text-white"],
+                        ["Trend Score", indicators.trend_score != null ? `${indicators.trend_score > 0 ? "+" : ""}${indicators.trend_score}/3` : "—", (indicators.trend_score ?? 0) > 0 ? "text-emerald-400" : (indicators.trend_score ?? 0) < 0 ? "text-red-400" : "text-white"],
+                        ["Volatility", indicators.volatility_20d?.toFixed(1) + "%", (indicators.volatility_20d ?? 25) > 40 ? "text-red-400" : "text-white"],
+                      ].map(([lbl, val, cls]) => (
+                        <div key={lbl as string} className="flex justify-between">
+                          <span className="text-xs text-slate-400">{lbl}</span>
+                          <span className={`text-xs font-mono font-bold ${cls}`}>{val ?? "—"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── AGENTS TAB ── */}
+            {activeTab === "agents" && (
+              <div className="space-y-2">
+                {votes.length === 0 && (
+                  <div className="text-center text-slate-600 py-12 text-sm">
+                    No votes yet — run an analysis first
+                  </div>
+                )}
+                {votes.map((v, i) => (
+                  <AgentCard key={v.agent} vote={v} isNew={i === newVoteIndex} />
+                ))}
+                {judgment && (
+                  <div className={`rounded-xl border-2 p-3 ${signalStyle(judgment.signal).border} ${signalStyle(judgment.signal).bg}`}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-bold flex items-center gap-1">⚖️ Judge Agent</span>
+                      <SignalBadge signal={judgment.signal} size="md" />
+                    </div>
+                    <p className="text-xs text-slate-300">{judgment.judge_reason}</p>
+                    {judgment.agreed_agents.length > 0 && (
+                      <div className="mt-2 text-[10px] text-slate-400">
+                        ✅ Agreed: {judgment.agreed_agents.join(", ")}
+                      </div>
+                    )}
+                    {judgment.disagreed_agents.length > 0 && (
+                      <div className="mt-1 text-[10px] text-slate-500">
+                        ❌ Disagreed: {judgment.disagreed_agents.join(", ")}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── OPTIONS TAB ── */}
+            {activeTab === "options" && (
+              <div className="space-y-3">
+                {!judgment ? (
+                  <div className="text-center text-slate-600 py-12 text-sm">Run analysis to see options details</div>
+                ) : (
+                  <>
+                    <div className={`rounded-2xl border-2 p-4 ${signalStyle(judgment.signal).border} ${signalStyle(judgment.signal).bg}`}>
+                      <div className="text-center mb-3">
+                        <SignalBadge signal={judgment.signal} size="lg" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 mt-3">
+                        {[
+                          ["Recommended", judgment.action?.replace("_"," ") || "—"],
+                          ["Strike", judgment.strike_hint],
+                          ["Expiry", judgment.expiry_hint],
+                          ["Confidence", `${judgment.confidence.toFixed(1)}%`],
+                        ].map(([k,v]) => (
+                          <div key={k} className="bg-black/20 rounded-lg p-2 text-center">
+                            <div className="text-[9px] text-slate-500 uppercase">{k}</div>
+                            <div className={`text-sm font-bold mt-0.5 ${signalStyle(judgment.signal).text}`}>{v}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="bg-slate-800/50 rounded-xl p-3 space-y-3">
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider">Entry Trigger</div>
+                      <p className="text-xs text-slate-200 leading-relaxed">{judgment.entry_trigger}</p>
+                    </div>
+                    <div className="bg-slate-800/50 rounded-xl p-3 space-y-2">
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider">Risk Management</div>
+                      <p className="text-xs text-amber-300 leading-relaxed">{judgment.risk_note}</p>
+                    </div>
+                    <div className="bg-slate-800/50 rounded-xl p-3 space-y-2">
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider">Price Targets</div>
+                      {[
+                        ["Entry", fmtPrice(judgment.entry_price), "text-white"],
+                        ["Target (3×ATR)", fmtPrice(judgment.target_price), "text-emerald-400"],
+                        ["Stop (2×ATR)", fmtPrice(judgment.stop_loss), "text-red-400"],
+                        ["R/R", rr > 0 ? `${rr.toFixed(2)}:1` : "—", rr >= 2 ? "text-emerald-400" : "text-amber-400"],
+                      ].map(([l,v,c]) => (
+                        <div key={l} className="flex justify-between">
+                          <span className="text-xs text-slate-400">{l}</span>
+                          <span className={`text-sm font-mono font-bold ${c}`}>{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── NEWS TAB ── */}
+            {activeTab === "news" && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-500 uppercase tracking-wider">Live News — {symbol}</span>
+                  <span className="flex items-center gap-1 text-[9px] text-emerald-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" /> live
+                  </span>
                 </div>
+                {(!livePrice?.news || livePrice.news.length === 0) && (
+                  <div className="text-center text-slate-600 py-8 text-sm">
+                    No news loaded — run an analysis first
+                  </div>
+                )}
+                {livePrice?.news?.map((n, i) => (
+                  <a key={i} href={n.url} target="_blank" rel="noopener noreferrer"
+                    className="block bg-slate-800/50 rounded-xl p-3 hover:bg-slate-700/50 transition-all border border-slate-700/50">
+                    <div className="text-xs font-semibold text-slate-200 leading-snug mb-1">{n.title}</div>
+                    {n.summary && <p className="text-[10px] text-slate-400 line-clamp-2 leading-relaxed">{n.summary}</p>}
+                    <div className="mt-1.5 flex items-center gap-2 text-[9px] text-slate-500">
+                      <span className="text-cyan-500">{n.source}</span>
+                      <span>·</span>
+                      <span>{n.published_at ? new Date(n.published_at).toLocaleTimeString() : "recent"}</span>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            )}
+
+            {/* ── HISTORY TAB ── */}
+            {activeTab === "history" && (
+              <div className="space-y-2">
+                <div className="text-[10px] text-slate-500 uppercase tracking-wider">
+                  Prediction History — {symbol}
+                </div>
+                {history.length === 0 && (
+                  <div className="text-center text-slate-600 py-8 text-sm">
+                    No predictions saved yet
+                  </div>
+                )}
+                {history.map((h, i) => (
+                  <div key={i} className="bg-slate-800/50 rounded-xl p-3 border border-slate-700/50">
+                    <div className="flex items-center justify-between mb-1">
+                      <SignalBadge signal={h.signal} size="sm" />
+                      <span className={`text-xs font-bold ${h.outcome === "CORRECT" ? "text-emerald-400" : h.outcome === "WRONG" ? "text-red-400" : "text-slate-400"}`}>
+                        {h.outcome || "PENDING"}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1 text-[10px]">
+                      <div><span className="text-slate-500">Entry:</span> <span className="text-white">${h.entry_price?.toFixed(2)}</span></div>
+                      <div><span className="text-slate-500">Target:</span> <span className="text-emerald-400">${h.target_price?.toFixed(2)}</span></div>
+                      <div><span className="text-slate-500">Conf:</span> <span className="text-cyan-400">{h.confidence?.toFixed(0)}%</span></div>
+                    </div>
+                    <div className="text-[9px] text-slate-600 mt-1">
+                      {h.timestamp ? new Date(h.timestamp * 1000).toLocaleString() : "—"}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
         </div>
-      )}
-
-      {/* Body */}
-      <div className="flex-1 min-h-0 flex overflow-hidden">
-
-        {/* ── Idle ── */}
-        {analysisState === "idle" && (
-          <div className="flex-1 flex flex-col items-center justify-center gap-6 p-8">
-            <div className="relative">
-              <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-blue-600/15 to-violet-600/15 border border-white/10 flex items-center justify-center">
-                <span className="text-4xl">📊</span>
-              </div>
-              <div className="absolute -top-1.5 -right-1.5 w-6 h-6 bg-blue-600 rounded-full flex items-center justify-center text-[10px] font-black shadow-lg shadow-blue-900/50">8</div>
-            </div>
-            <div className="text-center">
-              <h1 className="text-3xl font-bold">TradeSignal AI</h1>
-              <p className="text-white/40 text-sm mt-2 max-w-xs leading-relaxed">
-                8 specialized AI agents analyze every trade. BUY/SELL fires only when <span className="text-blue-400 font-semibold">6 of 8 agree</span>.
-              </p>
-            </div>
-            <div className="flex flex-wrap justify-center gap-3">
-              {["AAPL","NVDA","TSLA","SPY","BTC-USD"].map(s => (
-                <button key={s} onClick={() => { setInputVal(s); runAnalysis(s); }}
-                  className="bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20
-                             px-5 py-2.5 rounded-xl font-mono text-sm font-semibold transition-all hover:shadow-lg hover:shadow-white/5">
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ── Error ── */}
-        {analysisState === "error" && (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="bg-red-950/40 border border-red-800/40 rounded-2xl p-8 text-center max-w-sm">
-              <div className="text-3xl mb-3">⚠️</div>
-              <p className="text-red-400 text-sm">{error}</p>
-              <button onClick={() => setAnalysisState("idle")} className="mt-4 text-xs text-white/30 hover:text-white underline">Go back</button>
-            </div>
-          </div>
-        )}
-
-        {/* ── Active ── */}
-        {active && (
-          <>
-            {/* Left: Tabs + content */}
-            <div className="flex-1 min-w-0 flex flex-col p-3 gap-2">
-              {/* Tab bar */}
-              <div className="flex items-center gap-0 border-b border-white/6">
-                {[
-                  {k:"chart", label:"Chart"},
-                  {k:"agents", label:`Agents ${votes.length}/7`, badge: isRunning},
-                  {k:"history", label:"History"},
-                ].map(({k,label,badge}) => (
-                  <button key={k} onClick={() => setTab(k as any)}
-                    className={`px-4 py-2 text-xs font-semibold border-b-2 transition-colors -mb-px ${
-                      tab===k ? "border-blue-500 text-white" : "border-transparent text-white/35 hover:text-white/65"}`}>
-                    {label}{badge && <Dots />}
-                  </button>
-                ))}
-
-                {/* Indicator toggles (chart only) */}
-                {tab === "chart" && (
-                  <div className="ml-auto flex items-center gap-2">
-                    {[{l:"EMA",v:showEMA,fn:()=>setShowEMA(p=>!p)},{l:"BB",v:showBB,fn:()=>setShowBB(p=>!p)}].map(({l,v,fn}) => (
-                      <button key={l} onClick={fn}
-                        className={`text-[11px] px-2 py-0.5 rounded border transition-colors ${v?"bg-blue-600/25 border-blue-500/45 text-blue-300":"border-white/10 text-white/30 hover:text-white/55"}`}>
-                        {l}
-                      </button>
-                    ))}
-                    <div className="w-px h-4 bg-white/10 mx-1" />
-                    {(["volume","rsi","macd"] as const).map(t => (
-                      <button key={t} onClick={() => setBottomPanel(t)}
-                        className={`text-[11px] px-2 py-0.5 rounded border uppercase transition-colors ${bottomPanel===t?"bg-white/10 border-white/25 text-white":"border-white/8 text-white/30 hover:text-white/55"}`}>
-                        {t}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Tab content */}
-              <div className="flex-1 min-h-0">
-                {tab === "chart" && (
-                  <div className="flex flex-col h-full gap-2">
-                    <div className="flex-1 min-h-0">
-                      <MainChart chartData={chartData} chartState={chartState} judgment={judgment} showEMA={showEMA} showBB={showBB} />
-                    </div>
-                    {chartData && (
-                      <div className="h-28 flex-none">
-                        <SubChart data={chartData} active={bottomPanel} />
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {tab === "agents" && (
-                  <div className="h-full overflow-y-auto space-y-2.5 pr-1">
-                    {votes.map(v => <AgentCard key={v.agent} v={v} />)}
-                    {isRunning && Array.from({length: 7 - votes.length}).map((_,i) => (
-                      <div key={i} className="border border-white/5 rounded-xl p-3.5 bg-white/2 animate-pulse">
-                        <div className="flex gap-2 mb-2"><div className="w-6 h-6 bg-white/8 rounded" /><div className="h-4 w-36 bg-white/8 rounded" /></div>
-                        <div className="h-1 bg-white/5 rounded mb-2" /><div className="h-3 w-3/4 bg-white/5 rounded" />
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {tab === "history" && (
-                  <div className="h-full overflow-y-auto">
-                    {history.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center h-full text-center gap-2">
-                        <span className="text-2xl">📋</span>
-                        <p className="text-white/35 text-sm">No tracked predictions for {currentSym} yet.</p>
-                        <p className="text-white/20 text-xs max-w-xs">Predictions are saved automatically. Outcomes are verified after 24h and used to improve agent weights.</p>
-                      </div>
-                    ) : (
-                      <table className="w-full text-xs">
-                        <thead><tr className="text-white/30 border-b border-white/8 text-left">
-                          {["Date","Signal","Confidence","Entry","Stop","Target","Outcome"].map(h => (
-                            <th key={h} className="pb-2 pr-3 font-medium">{h}</th>
-                          ))}
-                        </tr></thead>
-                        <tbody>
-                          {history.map((p: any) => (
-                            <tr key={p.id} className="border-b border-white/4 hover:bg-white/2 transition-colors">
-                              <td className="py-2 pr-3 text-white/35 font-mono">{new Date(p.created_at).toLocaleDateString()}</td>
-                              <td className="py-2 pr-3">
-                                <span className={`font-black ${p.signal==="BUY"?"text-emerald-400":p.signal==="SELL"?"text-red-400":"text-amber-400"}`}>{p.signal}</span>
-                              </td>
-                              <td className="py-2 pr-3 text-white/45">{fmt(p.confidence)}%</td>
-                              <td className="py-2 pr-3 font-mono text-white/55">${fmt(p.entry_price)}</td>
-                              <td className="py-2 pr-3 font-mono text-red-400">${fmt(p.stop_loss)}</td>
-                              <td className="py-2 pr-3 font-mono text-emerald-400">${fmt(p.target_price)}</td>
-                              <td className="py-2">
-                                {p.outcome === "CORRECT" ? <span className="text-emerald-400 font-bold">✓ Win</span>
-                                 : p.outcome === "WRONG" ? <span className="text-red-400 font-bold">✗ Loss</span>
-                                 : <span className="text-white/20">Pending</span>}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Right sidebar */}
-            <div className="w-72 flex-none border-l border-white/6 flex flex-col overflow-hidden">
-              <div className="flex-1 overflow-y-auto p-3">
-                {judgment ? (
-                  <SignalPanel j={judgment} />
-                ) : (
-                  <div className="flex flex-col items-center justify-center h-full gap-4 text-center">
-                    <div className="w-12 h-12 border-2 border-blue-500/40 border-t-blue-500 rounded-full animate-spin" />
-                    <div>
-                      <p className="text-sm font-semibold text-white/60">Agents voting…</p>
-                      <p className="text-xs text-white/30 mt-1">{votes.length} of 7 reported</p>
-                    </div>
-                    {votes.length > 0 && (
-                      <div className="w-full space-y-1.5">
-                        {(["BUY","SELL","HOLD"] as Vote[]).map(v => {
-                          const n = votes.filter(x=>x.vote===v).length;
-                          const c = VOTE_CFG[v];
-                          return (
-                            <div key={v} className="flex items-center gap-2">
-                              <span className={`text-[10px] font-bold w-8 ${c.text}`}>{v}</span>
-                              <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                                <div className={`h-full rounded-full transition-all duration-500 ${c.bar}`} style={{width:`${(n/7)*100}%`}} />
-                              </div>
-                              <span className="text-[10px] text-white/30">{n}</span>
-                            </div>
-                          );
-                        })}
-                        <p className="text-[10px] text-blue-400/50 mt-2">Needs 6/8 to fire</p>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          </>
-        )}
       </div>
-
-      <style>{`
-        *::-webkit-scrollbar { width:4px; height:4px; }
-        *::-webkit-scrollbar-track { background: transparent; }
-        *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius:2px; }
-        .line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-      `}</style>
     </div>
   );
 }

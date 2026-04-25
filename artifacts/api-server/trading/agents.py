@@ -1,31 +1,37 @@
 """
-8 Trading Prediction Agents
-Each agent analyzes market data from its own perspective and votes BUY, SELL, or HOLD.
+8 Trading Prediction Agents — Full Hop indicator suite
+Output: BUY_CALL | BUY_PUT | HOLD
+Each agent is specialized; Judge fires only at 6/8 consensus.
 """
 import numpy as np
 import pandas as pd
-from typing import Optional
-import logging
+from indicators import (
+    compute_all_indicators, score_indicators_to_direction,
+    suggest_options, safe_float, compute_supertrend,
+    compute_stochastic, compute_rsi, compute_vwap,
+)
 
-logger = logging.getLogger(__name__)
-
-
-def safe_float(val, default=0.0):
-    try:
-        f = float(val)
-        return f if not np.isnan(f) and not np.isinf(f) else default
-    except Exception:
-        return default
+Signal = str  # "BUY_CALL" | "BUY_PUT" | "HOLD"
 
 
-# ---------------------------------------------------------------------------
+def _vote(agent_name: str, emoji: str, signal: Signal, confidence: float, reason: str, **extra) -> dict:
+    return {"agent": agent_name, "emoji": emoji, "vote": signal,
+            "confidence": round(min(confidence, 97), 1), "reason": reason, **extra}
+
+
+def _hold(agent_name: str, emoji: str, reason: str) -> dict:
+    return {"agent": agent_name, "emoji": emoji, "vote": "HOLD",
+            "confidence": 50.0, "reason": reason}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. PRICE ACTION AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 class PriceActionAgent:
     name = "Price Action Agent"
-    emoji = "📊"
+    emoji = "🕯️"
 
-    def analyze(self, df: pd.DataFrame, info: dict) -> dict:
+    def analyze(self, df: pd.DataFrame, ind: dict) -> dict:
         try:
             closes = df["Close"].values
             opens = df["Open"].values
@@ -33,622 +39,500 @@ class PriceActionAgent:
             lows = df["Low"].values
             n = len(closes)
             if n < 10:
-                return self._hold("Insufficient data")
+                return _hold(self.name, self.emoji, "Insufficient candle data")
 
             c, o, h, l = closes[-1], opens[-1], highs[-1], lows[-1]
-            pc = closes[-2]
+            pc, po = closes[-2], opens[-2]
             body = abs(c - o)
-            candle_range = h - l
-            body_pct = body / candle_range if candle_range > 0 else 0
-            upper_wick = (h - max(c, o)) / candle_range if candle_range > 0 else 0
-            lower_wick = (min(c, o) - l) / candle_range if candle_range > 0 else 0
+            rng = h - l
+            bp = body / rng if rng > 0 else 0
+            uw = (h - max(c, o)) / rng if rng > 0 else 0
+            lw = (min(c, o) - l) / rng if rng > 0 else 0
 
-            signals = []
-            # Bullish engulfing
-            if c > o and closes[-2] < opens[-2] and c > opens[-2] and o < closes[-2]:
-                signals.append(("BUY", 0.8, "Bullish engulfing"))
-            # Bearish engulfing
-            if c < o and closes[-2] > opens[-2] and c < opens[-2] and o > closes[-2]:
-                signals.append(("SELL", 0.8, "Bearish engulfing"))
+            signals, reasons = [], []
+
+            # Bullish engulfing → CALL
+            if c > o and pc < po and c > po and o < pc:
+                signals.append("BUY_CALL"); reasons.append("Bullish engulfing pattern")
+            # Bearish engulfing → PUT
+            if c < o and pc > po and c < po and o > pc:
+                signals.append("BUY_PUT"); reasons.append("Bearish engulfing pattern")
+            # Hammer → CALL
+            if lw > 0.6 and uw < 0.1 and c >= o:
+                signals.append("BUY_CALL"); reasons.append("Hammer (bullish reversal)")
+            # Shooting star → PUT
+            if uw > 0.6 and lw < 0.1 and c <= o:
+                signals.append("BUY_PUT"); reasons.append("Shooting star (bearish reversal)")
             # Doji
-            if body_pct < 0.1:
-                signals.append(("HOLD", 0.6, "Doji – indecision"))
-            # Hammer (bullish)
-            if lower_wick > 0.6 and upper_wick < 0.1 and c > o:
-                signals.append(("BUY", 0.75, "Hammer pattern"))
-            # Shooting star (bearish)
-            if upper_wick > 0.6 and lower_wick < 0.1 and c < o:
-                signals.append(("SELL", 0.75, "Shooting star"))
-            # Strong green candle
-            if c > o and body_pct > 0.7 and (c - pc) / pc > 0.005:
-                signals.append(("BUY", 0.65, "Strong bullish candle"))
-            # Strong red candle
-            if c < o and body_pct > 0.7 and (pc - c) / pc > 0.005:
-                signals.append(("SELL", 0.65, "Strong bearish candle"))
-            # Higher highs / higher lows trend
+            if bp < 0.1:
+                reasons.append("Doji — indecision")
+            # Strong momentum candle
+            if c > o and bp > 0.65 and ind.get("rel_volume", 1) > 1.3:
+                signals.append("BUY_CALL"); reasons.append(f"Strong bullish candle + {ind.get('rel_volume',1):.1f}× vol")
+            if c < o and bp > 0.65 and ind.get("rel_volume", 1) > 1.3:
+                signals.append("BUY_PUT"); reasons.append(f"Strong bearish candle + {ind.get('rel_volume',1):.1f}× vol")
+            # Higher highs / higher lows (bullish structure)
             if n >= 5:
-                recent_highs = highs[-5:]
-                recent_lows = lows[-5:]
-                if recent_highs[-1] > recent_highs[0] and recent_lows[-1] > recent_lows[0]:
-                    signals.append(("BUY", 0.6, "Higher highs + higher lows"))
-                elif recent_highs[-1] < recent_highs[0] and recent_lows[-1] < recent_lows[0]:
-                    signals.append(("SELL", 0.6, "Lower highs + lower lows"))
+                if highs[-1] > highs[-5] and lows[-1] > lows[-5]:
+                    signals.append("BUY_CALL"); reasons.append("Higher highs + higher lows structure")
+                elif highs[-1] < highs[-5] and lows[-1] < lows[-5]:
+                    signals.append("BUY_PUT"); reasons.append("Lower highs + lower lows structure")
+            # SuperTrend agreement
+            if ind.get("supertrend_dir") == "up":
+                signals.append("BUY_CALL"); reasons.append(f"SuperTrend bullish (dist {ind.get('supertrend_dist_pct',0):.1f}%)")
+            else:
+                signals.append("BUY_PUT"); reasons.append(f"SuperTrend bearish")
 
-            return self._aggregate(signals, c, highs, lows)
+            calls = signals.count("BUY_CALL")
+            puts = signals.count("BUY_PUT")
+            conf = 55 + (max(calls, puts) / max(calls + puts, 1)) * 30
+            r = " | ".join(reasons[:3])
+            if calls > puts:
+                return _vote(self.name, self.emoji, "BUY_CALL", conf, r)
+            elif puts > calls:
+                return _vote(self.name, self.emoji, "BUY_PUT", conf, r)
+            return _hold(self.name, self.emoji, r or "No clear pattern")
         except Exception as e:
-            return self._hold(f"Error: {e}")
-
-    def _aggregate(self, signals, price, highs, lows):
-        if not signals:
-            return self._hold("No clear pattern")
-        buys = [(s, c, r) for s, c, r in signals if s == "BUY"]
-        sells = [(s, c, r) for s, c, r in signals if s == "SELL"]
-        if len(buys) > len(sells):
-            best = max(buys, key=lambda x: x[1])
-            return self._vote("BUY", best[1], best[2])
-        elif len(sells) > len(buys):
-            best = max(sells, key=lambda x: x[1])
-            return self._vote("SELL", best[1], best[2])
-        return self._hold("Mixed patterns")
-
-    def _vote(self, direction, confidence, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": direction,
-                "confidence": round(confidence * 100, 1), "reason": reason}
-
-    def _hold(self, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": "HOLD",
-                "confidence": 50.0, "reason": reason}
+            return _hold(self.name, self.emoji, f"Error: {e}")
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. TECHNICAL AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 class TechnicalAgent:
     name = "Technical Agent"
     emoji = "📈"
 
-    def analyze(self, df: pd.DataFrame, info: dict) -> dict:
+    def analyze(self, df: pd.DataFrame, ind: dict) -> dict:
         try:
-            if len(df) < 26:
-                return self._hold("Not enough data for indicators")
-            closes = df["Close"]
+            result = score_indicators_to_direction(ind)
+            direction = result["direction"]
+            conf = result["confidence"]
+            score = result["score"]
 
-            # RSI
-            delta = closes.diff()
-            gain = delta.clip(lower=0).rolling(14).mean()
-            loss = (-delta.clip(upper=0)).rolling(14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs))
-            rsi_now = safe_float(rsi.iloc[-1])
+            rsi = ind.get("rsi14", 50)
+            stoch = ind.get("stoch_k", 50)
+            st_dir = ind.get("supertrend_dir", "down")
+            macd_h = ind.get("macd_hist", 0)
 
-            # MACD
-            ema12 = closes.ewm(span=12).mean()
-            ema26 = closes.ewm(span=26).mean()
-            macd_line = ema12 - ema26
-            signal_line = macd_line.ewm(span=9).mean()
-            macd_now = safe_float(macd_line.iloc[-1])
-            sig_now = safe_float(signal_line.iloc[-1])
-            macd_cross_up = macd_now > sig_now and safe_float(macd_line.iloc[-2]) <= safe_float(signal_line.iloc[-2])
-            macd_cross_dn = macd_now < sig_now and safe_float(macd_line.iloc[-2]) >= safe_float(signal_line.iloc[-2])
+            reasons = [
+                f"Composite score {score:+.1f}/9",
+                f"RSI {rsi:.0f} | Stoch {stoch:.0f}",
+                f"SuperTrend {st_dir} | MACD hist {macd_h:+.4f}",
+            ]
 
-            # Bollinger Bands
-            ma20 = closes.rolling(20).mean()
-            std20 = closes.rolling(20).std()
-            upper_bb = ma20 + 2 * std20
-            lower_bb = ma20 - 2 * std20
-            price = safe_float(closes.iloc[-1])
-            bb_upper = safe_float(upper_bb.iloc[-1])
-            bb_lower = safe_float(lower_bb.iloc[-1])
-            bb_mid = safe_float(ma20.iloc[-1])
-
-            # EMA crossover (9/21)
-            ema9 = closes.ewm(span=9).mean()
-            ema21 = closes.ewm(span=21).mean()
-            ema9_now = safe_float(ema9.iloc[-1])
-            ema21_now = safe_float(ema21.iloc[-1])
-            ema9_prev = safe_float(ema9.iloc[-2])
-            ema21_prev = safe_float(ema21.iloc[-2])
-            ema_golden = ema9_now > ema21_now and ema9_prev <= ema21_prev
-            ema_death = ema9_now < ema21_now and ema9_prev >= ema21_prev
-
-            signals = []
-            reasons = []
-            # RSI
-            if rsi_now < 30:
-                signals.append("BUY"); reasons.append(f"RSI oversold ({rsi_now:.1f})")
-            elif rsi_now > 70:
-                signals.append("SELL"); reasons.append(f"RSI overbought ({rsi_now:.1f})")
-            else:
-                reasons.append(f"RSI neutral ({rsi_now:.1f})")
-
-            # MACD
-            if macd_cross_up:
-                signals.append("BUY"); reasons.append("MACD bullish crossover")
-            elif macd_cross_dn:
-                signals.append("SELL"); reasons.append("MACD bearish crossover")
-            elif macd_now > sig_now:
-                signals.append("BUY"); reasons.append("MACD above signal")
-            else:
-                signals.append("SELL"); reasons.append("MACD below signal")
-
-            # Bollinger
-            if price < bb_lower:
-                signals.append("BUY"); reasons.append("Below lower Bollinger Band")
-            elif price > bb_upper:
-                signals.append("SELL"); reasons.append("Above upper Bollinger Band")
-
-            # EMA
-            if ema_golden:
-                signals.append("BUY"); reasons.append("EMA golden cross (9/21)")
-            elif ema_death:
-                signals.append("SELL"); reasons.append("EMA death cross (9/21)")
-            elif ema9_now > ema21_now:
-                signals.append("BUY"); reasons.append("Price above EMA trend")
-            else:
-                signals.append("SELL"); reasons.append("Price below EMA trend")
-
-            buys = signals.count("BUY")
-            sells = signals.count("SELL")
-            total = buys + sells if buys + sells > 0 else 1
-            if buys > sells:
-                conf = 55 + (buys / total) * 35
-                return self._vote("BUY", conf, " | ".join(reasons[:3]))
-            elif sells > buys:
-                conf = 55 + (sells / total) * 35
-                return self._vote("SELL", conf, " | ".join(reasons[:3]))
-            return self._hold(" | ".join(reasons[:2]))
+            if direction == "BULLISH":
+                return _vote(self.name, self.emoji, "BUY_CALL", conf, " | ".join(reasons))
+            elif direction == "BEARISH":
+                return _vote(self.name, self.emoji, "BUY_PUT", conf, " | ".join(reasons))
+            return _hold(self.name, self.emoji, f"Neutral — score {score:+.1f} | " + " | ".join(reasons[:2]))
         except Exception as e:
-            return self._hold(f"Error: {e}")
-
-    def _vote(self, direction, confidence, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": direction,
-                "confidence": round(min(confidence, 95), 1), "reason": reason}
-
-    def _hold(self, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": "HOLD",
-                "confidence": 50.0, "reason": reason}
+            return _hold(self.name, self.emoji, f"Error: {e}")
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 3. VOLUME AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 class VolumeAgent:
     name = "Volume Agent"
     emoji = "📦"
 
-    def analyze(self, df: pd.DataFrame, info: dict) -> dict:
+    def analyze(self, df: pd.DataFrame, ind: dict) -> dict:
         try:
-            if len(df) < 20:
-                return self._hold("Not enough data")
-            closes = df["Close"].values
-            volumes = df["Volume"].values
+            rel_v = ind.get("rel_volume", 1.0)
+            obv_slope = ind.get("obv_slope_10d_pct", 0.0)
+            up_dn = ind.get("up_dn_vol_ratio", 1.0)
+            vol_trend = ind.get("vol_trend_5v20", 1.0)
+            vc = ind.get("vol_confirms", "neutral")
+            ch = ind.get("change_1d", 0)
 
-            avg_vol = np.mean(volumes[-20:])
-            curr_vol = safe_float(volumes[-1])
-            vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1
+            signals, reasons = [], []
 
-            # OBV
-            obv = [0]
-            for i in range(1, len(closes)):
-                if closes[i] > closes[i - 1]:
-                    obv.append(obv[-1] + volumes[i])
-                elif closes[i] < closes[i - 1]:
-                    obv.append(obv[-1] - volumes[i])
-                else:
-                    obv.append(obv[-1])
-            obv = np.array(obv)
-            obv_trend = obv[-1] > np.mean(obv[-10:])  # OBV above recent average
+            # Unusual volume spike
+            if rel_v > 2.0:
+                reasons.append(f"Unusual volume spike {rel_v:.1f}× avg")
+                signals.append("BUY_CALL" if ch > 0 else "BUY_PUT")
+            elif rel_v > 1.5:
+                reasons.append(f"Above-avg volume {rel_v:.1f}×")
+                signals.append("BUY_CALL" if ch > 0 else "BUY_PUT")
 
-            # Money flow
-            highs = df["High"].values
-            lows = df["Low"].values
-            typical_price = (highs + lows + closes) / 3
-            raw_mf = typical_price * volumes
-            pos_mf = sum(raw_mf[i] for i in range(1, len(closes)) if closes[i] > closes[i - 1])
-            neg_mf = sum(raw_mf[i] for i in range(1, len(closes)) if closes[i] < closes[i - 1])
-            mfr = pos_mf / neg_mf if neg_mf > 0 else 1
-            mfi = 100 - (100 / (1 + mfr))
+            # OBV slope (dark pool proxy)
+            if obv_slope > 8:
+                signals.append("BUY_CALL"); reasons.append(f"OBV rising +{obv_slope:.0f}% (10d)")
+            elif obv_slope < -8:
+                signals.append("BUY_PUT"); reasons.append(f"OBV falling {obv_slope:.0f}% (10d)")
 
-            reasons = []
-            signals = []
+            # Up/down day volume ratio (accumulation vs distribution)
+            if up_dn > 1.4:
+                signals.append("BUY_CALL"); reasons.append(f"Accumulation: up/dn vol {up_dn:.2f}x")
+            elif up_dn < 0.7:
+                signals.append("BUY_PUT"); reasons.append(f"Distribution: up/dn vol {up_dn:.2f}x")
 
-            if vol_ratio > 2.0:
-                reasons.append(f"Unusual volume spike ({vol_ratio:.1f}x avg)")
-                if closes[-1] > closes[-2]:
-                    signals.append("BUY")
-                else:
-                    signals.append("SELL")
-            elif vol_ratio > 1.5:
-                reasons.append(f"Above-average volume ({vol_ratio:.1f}x)")
+            # Volume trend (building vs drying)
+            if vol_trend > 1.3:
+                reasons.append(f"Vol building (5d/20d {vol_trend:.1f}×)")
+                signals.append("BUY_CALL" if ch > 0 else "BUY_PUT")
+            elif vol_trend < 0.7:
+                reasons.append("Volume drying up — low conviction")
 
-            if obv_trend:
-                signals.append("BUY"); reasons.append("OBV trending up")
-            else:
-                signals.append("SELL"); reasons.append("OBV trending down")
+            # Volume confirms move
+            if vc == "confirms" and ch > 0:
+                signals.append("BUY_CALL"); reasons.append("Volume confirms bullish move")
+            elif vc == "confirms" and ch < 0:
+                signals.append("BUY_PUT"); reasons.append("Volume confirms bearish move")
 
-            if mfi > 60:
-                signals.append("BUY"); reasons.append(f"Positive money flow (MFI {mfi:.0f})")
-            elif mfi < 40:
-                signals.append("SELL"); reasons.append(f"Negative money flow (MFI {mfi:.0f})")
-
-            buys = signals.count("BUY")
-            sells = signals.count("SELL")
-            conf_base = 55 + min(vol_ratio * 5, 20)
-
-            if buys > sells:
-                return self._vote("BUY", conf_base, " | ".join(reasons[:3]))
-            elif sells > buys:
-                return self._vote("SELL", conf_base, " | ".join(reasons[:3]))
-            return self._hold(f"Vol {vol_ratio:.1f}x, MFI {mfi:.0f} – neutral")
+            calls = signals.count("BUY_CALL")
+            puts = signals.count("BUY_PUT")
+            conf = 55 + min(rel_v * 6, 25)
+            r = " | ".join(reasons[:3]) or f"Vol {rel_v:.1f}× neutral"
+            if calls > puts:
+                return _vote(self.name, self.emoji, "BUY_CALL", conf, r)
+            elif puts > calls:
+                return _vote(self.name, self.emoji, "BUY_PUT", conf, r)
+            return _hold(self.name, self.emoji, r)
         except Exception as e:
-            return self._hold(f"Error: {e}")
-
-    def _vote(self, direction, confidence, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": direction,
-                "confidence": round(min(confidence, 95), 1), "reason": reason}
-
-    def _hold(self, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": "HOLD",
-                "confidence": 50.0, "reason": reason}
+            return _hold(self.name, self.emoji, f"Error: {e}")
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. SENTIMENT AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 class SentimentAgent:
     name = "Sentiment Agent"
     emoji = "📰"
 
-    BULLISH_WORDS = [
-        "surge", "rally", "gain", "rise", "jump", "soar", "beat", "exceed",
-        "record", "high", "growth", "profit", "buy", "upgrade", "bullish",
-        "positive", "strong", "boost", "momentum", "breakout", "outperform",
-        "dividend", "partnership", "acquisition", "innovation", "revenue",
-    ]
-    BEARISH_WORDS = [
-        "drop", "fall", "crash", "decline", "plunge", "miss", "loss", "sell",
-        "downgrade", "bearish", "negative", "weak", "cut", "layoff", "risk",
-        "concern", "warn", "volatile", "uncertainty", "lawsuit", "fraud",
-        "recall", "shortage", "debt", "deficit",
-    ]
+    BULLISH = ["surge","rally","gain","rise","jump","soar","beat","exceed","record","high","growth",
+               "profit","upgrade","bullish","positive","strong","boost","breakout","outperform",
+               "dividend","partnership","acquisition","innovation","revenue","approval","launch",
+               "deal","contract","buy","raises","guidance","beat","recovery","expansion"]
+    BEARISH = ["drop","fall","crash","decline","plunge","miss","loss","sell","downgrade","bearish",
+               "negative","weak","cut","layoff","risk","concern","warn","volatile","uncertainty",
+               "lawsuit","fraud","recall","shortage","debt","deficit","investigation","probe",
+               "default","bankruptcy","missed","disappoints","suspended","warning","downside"]
 
-    def analyze(self, df: pd.DataFrame, info: dict) -> dict:
+    def analyze(self, df: pd.DataFrame, ind: dict) -> dict:
         try:
-            news = info.get("news", [])
+            news = ind.get("_news", [])
             if not news:
-                # Fall back to recent price trend as proxy
-                closes = df["Close"].values
-                if len(closes) >= 5:
-                    pct = (closes[-1] - closes[-5]) / closes[-5] * 100
-                    if pct > 2:
-                        return self._vote("BUY", 60, f"5-day price trend +{pct:.1f}% (no news data)")
-                    elif pct < -2:
-                        return self._vote("SELL", 60, f"5-day price trend {pct:.1f}% (no news data)")
-                return self._hold("No news data available")
+                # Use 5-day price trend as proxy
+                ch5 = ind.get("change_5d", 0)
+                if ch5 > 3:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 62, f"5-day trend +{ch5:.1f}% (no live news)")
+                elif ch5 < -3:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 62, f"5-day trend {ch5:.1f}% (no live news)")
+                return _hold(self.name, self.emoji, "No news data; price trend neutral")
 
-            bull_score = 0
-            bear_score = 0
-            headlines = []
-            for item in news[:10]:
-                title = item.get("title", "").lower()
-                headlines.append(title)
-                for w in self.BULLISH_WORDS:
-                    if w in title:
-                        bull_score += 1
-                for w in self.BEARISH_WORDS:
-                    if w in title:
-                        bear_score += 1
+            bull_score = bear_score = 0
+            for item in news[:12]:
+                title = (item.get("title", "") + " " + item.get("summary", "")).lower()
+                for w in self.BULLISH:
+                    if w in title: bull_score += 1
+                for w in self.BEARISH:
+                    if w in title: bear_score += 1
 
             total = bull_score + bear_score
             if total == 0:
-                return self._hold("Neutral news sentiment")
+                return _hold(self.name, self.emoji, "Neutral news sentiment")
 
-            sentiment_pct = bull_score / total
+            ratio = bull_score / total
             conf = 55 + abs(bull_score - bear_score) / max(total, 1) * 30
-
-            if sentiment_pct > 0.6:
-                return self._vote("BUY", conf, f"Bullish news ({bull_score} bull vs {bear_score} bear signals)")
-            elif sentiment_pct < 0.4:
-                return self._vote("SELL", conf, f"Bearish news ({bear_score} bear vs {bull_score} bull signals)")
-            return self._hold(f"Mixed news sentiment ({bull_score}B/{bear_score}S)")
+            if ratio > 0.6:
+                return _vote(self.name, self.emoji, "BUY_CALL", conf,
+                             f"Bullish news: {bull_score}↑ vs {bear_score}↓ signals")
+            elif ratio < 0.4:
+                return _vote(self.name, self.emoji, "BUY_PUT", conf,
+                             f"Bearish news: {bear_score}↓ vs {bull_score}↑ signals")
+            return _hold(self.name, self.emoji, f"Mixed: {bull_score}↑ / {bear_score}↓")
         except Exception as e:
-            return self._hold(f"Error: {e}")
-
-    def _vote(self, direction, confidence, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": direction,
-                "confidence": round(min(confidence, 90), 1), "reason": reason}
-
-    def _hold(self, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": "HOLD",
-                "confidence": 50.0, "reason": reason}
+            return _hold(self.name, self.emoji, f"Error: {e}")
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 5. OPTIONS FLOW AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 class OptionsFlowAgent:
     name = "Options Flow Agent"
     emoji = "🎯"
 
-    def analyze(self, df: pd.DataFrame, info: dict) -> dict:
+    def analyze(self, df: pd.DataFrame, ind: dict) -> dict:
         try:
             import yfinance as yf
-            symbol = info.get("symbol", "")
-            try:
-                ticker = yf.Ticker(symbol)
-                options_dates = ticker.options
-                if not options_dates:
-                    return self._hold("No options data available")
+            symbol = ind.get("_symbol", "")
+            if not symbol:
+                return _hold(self.name, self.emoji, "No symbol provided")
 
-                opt_chain = ticker.option_chain(options_dates[0])
-                calls = opt_chain.calls
-                puts = opt_chain.puts
+            ticker = yf.Ticker(symbol)
+            dates = ticker.options
+            if not dates:
+                return _hold(self.name, self.emoji, "No options chain available")
 
-                if calls.empty and puts.empty:
-                    return self._hold("No options chain data")
+            # Check near-term and next expiry
+            chain0 = ticker.option_chain(dates[0])
+            calls = chain0.calls
+            puts = chain0.puts
 
-                total_call_oi = safe_float(calls["openInterest"].sum()) if "openInterest" in calls.columns else 0
-                total_put_oi = safe_float(puts["openInterest"].sum()) if "openInterest" in puts.columns else 0
-                total_call_vol = safe_float(calls["volume"].sum()) if "volume" in calls.columns else 0
-                total_put_vol = safe_float(puts["volume"].sum()) if "volume" in puts.columns else 0
+            total_call_oi = safe_float(calls["openInterest"].sum()) if "openInterest" in calls.columns else 0
+            total_put_oi = safe_float(puts["openInterest"].sum()) if "openInterest" in puts.columns else 0
+            total_call_vol = safe_float(calls["volume"].sum()) if "volume" in calls.columns else 0
+            total_put_vol = safe_float(puts["volume"].sum()) if "volume" in puts.columns else 0
 
-                # Put/Call ratio
-                pc_oi = total_put_oi / total_call_oi if total_call_oi > 0 else 1
-                pc_vol = total_put_vol / total_call_vol if total_call_vol > 0 else 1
+            pc_oi = total_put_oi / total_call_oi if total_call_oi > 0 else 1
+            pc_vol = total_put_vol / total_call_vol if total_call_vol > 0 else 1
 
-                reasons = [f"P/C OI: {pc_oi:.2f}", f"P/C Vol: {pc_vol:.2f}"]
+            # Unusual call activity (big bets on upside)
+            reasons = [f"P/C OI: {pc_oi:.2f}", f"P/C Vol: {pc_vol:.2f}"]
 
-                # Unusual activity: high call volume relative to put volume
-                if pc_vol < 0.6:
-                    return self._vote("BUY", 72, f"Bullish options flow: {' | '.join(reasons)}")
-                elif pc_vol > 1.4:
-                    return self._vote("SELL", 72, f"Bearish options flow: {' | '.join(reasons)}")
-                elif pc_oi < 0.7:
-                    return self._vote("BUY", 62, f"Call OI dominance: {' | '.join(reasons)}")
-                elif pc_oi > 1.3:
-                    return self._vote("SELL", 62, f"Put OI dominance: {' | '.join(reasons)}")
-                return self._hold(f"Neutral options flow: {' | '.join(reasons)}")
-            except Exception:
-                return self._hold("Options data unavailable")
+            if pc_vol < 0.5:
+                return _vote(self.name, self.emoji, "BUY_CALL", 80,
+                             f"Heavy call flow — {' | '.join(reasons)}")
+            elif pc_vol < 0.7:
+                return _vote(self.name, self.emoji, "BUY_CALL", 68,
+                             f"Call-dominated flow — {' | '.join(reasons)}")
+            elif pc_vol > 2.0:
+                return _vote(self.name, self.emoji, "BUY_PUT", 80,
+                             f"Heavy put flow — {' | '.join(reasons)}")
+            elif pc_vol > 1.4:
+                return _vote(self.name, self.emoji, "BUY_PUT", 68,
+                             f"Put-dominated flow — {' | '.join(reasons)}")
+            elif pc_oi < 0.7:
+                return _vote(self.name, self.emoji, "BUY_CALL", 62,
+                             f"Call OI dominance — {' | '.join(reasons)}")
+            elif pc_oi > 1.3:
+                return _vote(self.name, self.emoji, "BUY_PUT", 62,
+                             f"Put OI dominance — {' | '.join(reasons)}")
+            return _hold(self.name, self.emoji, f"Neutral flow — {' | '.join(reasons)}")
         except Exception as e:
-            return self._hold(f"Error: {e}")
-
-    def _vote(self, direction, confidence, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": direction,
-                "confidence": round(confidence, 1), "reason": reason}
-
-    def _hold(self, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": "HOLD",
-                "confidence": 50.0, "reason": reason}
+            return _hold(self.name, self.emoji, f"Options unavailable: {e}")
 
 
-# ---------------------------------------------------------------------------
-# 6. MOMENTUM AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. MOMENTUM AGENT (short-term focus, intraday awareness)
+# ─────────────────────────────────────────────────────────────────────────────
 class MomentumAgent:
     name = "Momentum Agent"
     emoji = "⚡"
 
-    def analyze(self, df: pd.DataFrame, info: dict) -> dict:
+    def analyze(self, df: pd.DataFrame, ind: dict) -> dict:
         try:
             closes = df["Close"].values
             highs = df["High"].values
             lows = df["Low"].values
             n = len(closes)
-            if n < 20:
-                return self._hold("Not enough data")
+            if n < 10:
+                return _hold(self.name, self.emoji, "Not enough data")
 
             price = closes[-1]
-            reasons = []
-            signals = []
+            signals, reasons = [], []
 
-            # Rate of change (ROC 10)
-            roc10 = (closes[-1] - closes[-10]) / closes[-10] * 100 if closes[-10] != 0 else 0
-            if roc10 > 3:
-                signals.append("BUY"); reasons.append(f"ROC-10: +{roc10:.1f}%")
-            elif roc10 < -3:
-                signals.append("SELL"); reasons.append(f"ROC-10: {roc10:.1f}%")
+            # Rate of change
+            roc5 = (closes[-1] - closes[-5]) / closes[-5] * 100 if n >= 5 and closes[-5] > 0 else 0
+            roc10 = (closes[-1] - closes[-10]) / closes[-10] * 100 if n >= 10 and closes[-10] > 0 else 0
 
-            # 20-day high breakout
-            high20 = np.max(highs[-20:])
-            low20 = np.min(lows[-20:])
-            if price >= high20 * 0.99:
-                signals.append("BUY"); reasons.append("Near 20-day high breakout")
-            elif price <= low20 * 1.01:
-                signals.append("SELL"); reasons.append("Near 20-day low breakdown")
+            if roc5 > 2:
+                signals.append("BUY_CALL"); reasons.append(f"5D ROC +{roc5:.1f}%")
+            elif roc5 < -2:
+                signals.append("BUY_PUT"); reasons.append(f"5D ROC {roc5:.1f}%")
+            if roc10 > 4:
+                signals.append("BUY_CALL"); reasons.append(f"10D ROC +{roc10:.1f}%")
+            elif roc10 < -4:
+                signals.append("BUY_PUT"); reasons.append(f"10D ROC {roc10:.1f}%")
 
-            # ADX-like trend strength (simplified)
-            tr = np.maximum(highs - lows,
-                            np.maximum(np.abs(highs - np.roll(closes, 1)),
-                                       np.abs(lows - np.roll(closes, 1))))[1:]
-            atr = np.mean(tr[-14:]) if len(tr) >= 14 else np.mean(tr)
+            # 20-day high/low breakout
+            h20 = np.max(highs[-20:]) if n >= 20 else np.max(highs)
+            l20 = np.min(lows[-20:]) if n >= 20 else np.min(lows)
+            if price >= h20 * 0.99:
+                signals.append("BUY_CALL"); reasons.append(f"Near 20D breakout high ${h20:.2f}")
+            elif price <= l20 * 1.01:
+                signals.append("BUY_PUT"); reasons.append(f"Near 20D breakdown low ${l20:.2f}")
 
-            # Consecutive candles
+            # Streak
             bull_streak = 0
+            for i in range(n-1, max(n-7, 0), -1):
+                if closes[i] > closes[i-1]: bull_streak += 1
+                else: break
             bear_streak = 0
-            for i in range(n - 1, max(n - 6, 0), -1):
-                if closes[i] > closes[i - 1]:
-                    bull_streak += 1
-                else:
-                    break
-            for i in range(n - 1, max(n - 6, 0), -1):
-                if closes[i] < closes[i - 1]:
-                    bear_streak += 1
-                else:
-                    break
+            for i in range(n-1, max(n-7, 0), -1):
+                if closes[i] < closes[i-1]: bear_streak += 1
+                else: break
+
             if bull_streak >= 3:
-                signals.append("BUY"); reasons.append(f"{bull_streak}-day bullish streak")
+                signals.append("BUY_CALL"); reasons.append(f"{bull_streak}-day bull streak")
             if bear_streak >= 3:
-                signals.append("SELL"); reasons.append(f"{bear_streak}-day bearish streak")
+                signals.append("BUY_PUT"); reasons.append(f"{bear_streak}-day bear streak")
 
-            # Momentum score
-            short_mom = (closes[-1] - closes[-5]) / closes[-5] * 100 if closes[-5] != 0 else 0
-            if short_mom > 1.5:
-                signals.append("BUY"); reasons.append(f"Short momentum +{short_mom:.1f}%")
-            elif short_mom < -1.5:
-                signals.append("SELL"); reasons.append(f"Short momentum {short_mom:.1f}%")
+            # VWAP momentum
+            pvwap = ind.get("price_vs_vwap_pct", 0)
+            if pvwap > 1.0:
+                signals.append("BUY_CALL"); reasons.append(f"Price {pvwap:.1f}% above VWAP")
+            elif pvwap < -1.0:
+                signals.append("BUY_PUT"); reasons.append(f"Price {pvwap:.1f}% below VWAP")
 
-            buys = signals.count("BUY")
-            sells = signals.count("SELL")
-            total = buys + sells or 1
-            conf = 55 + (max(buys, sells) / total) * 30
+            calls = signals.count("BUY_CALL")
+            puts = signals.count("BUY_PUT")
+            total = calls + puts or 1
+            conf = 55 + (max(calls, puts) / total) * 32
+            r = " | ".join(reasons[:3]) or f"ROC5: {roc5:+.1f}%"
 
-            if buys > sells:
-                return self._vote("BUY", conf, " | ".join(reasons[:3]))
-            elif sells > buys:
-                return self._vote("SELL", conf, " | ".join(reasons[:3]))
-            return self._hold(f"Momentum neutral (ROC: {roc10:.1f}%)")
+            if calls > puts:
+                return _vote(self.name, self.emoji, "BUY_CALL", conf, r)
+            elif puts > calls:
+                return _vote(self.name, self.emoji, "BUY_PUT", conf, r)
+            return _hold(self.name, self.emoji, r)
         except Exception as e:
-            return self._hold(f"Error: {e}")
-
-    def _vote(self, direction, confidence, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": direction,
-                "confidence": round(min(confidence, 95), 1), "reason": reason}
-
-    def _hold(self, reason):
-        return {"agent": self.name, "emoji": self.emoji, "vote": "HOLD",
-                "confidence": 50.0, "reason": reason}
+            return _hold(self.name, self.emoji, f"Error: {e}")
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 7. RISK AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 class RiskAgent:
     name = "Risk Agent"
     emoji = "🛡️"
 
-    def analyze(self, df: pd.DataFrame, info: dict) -> dict:
+    def analyze(self, df: pd.DataFrame, ind: dict) -> dict:
         try:
-            closes = df["Close"].values
-            highs = df["High"].values
-            lows = df["Low"].values
-            price = closes[-1]
+            price = ind.get("price", df["Close"].iloc[-1])
+            atr = ind.get("atr14", price * 0.02)
+            vola = ind.get("volatility_20d", 25)
+            rr = 3 / 2  # ATR-based risk/reward is 3:2 target:stop
 
-            # ATR-based stop loss
-            tr = np.maximum(highs[1:] - lows[1:],
-                            np.maximum(np.abs(highs[1:] - closes[:-1]),
-                                       np.abs(lows[1:] - closes[:-1])))
-            atr = np.mean(tr[-14:]) if len(tr) >= 14 else (np.mean(tr) if len(tr) > 0 else price * 0.02)
-
-            stop_loss_long = price - 2 * atr
-            stop_loss_short = price + 2 * atr
-            target_long = price + 3 * atr
-            target_short = price - 3 * atr
+            signals, reasons = [], []
 
             # Volatility regime
-            returns = np.diff(closes) / closes[:-1]
-            vol = np.std(returns[-20:]) * np.sqrt(252) * 100 if len(returns) >= 20 else 30
-
-            reasons = []
-            signals = []
-
-            if vol < 20:
-                signals.append("BUY"); reasons.append(f"Low volatility ({vol:.0f}% ann.) – favorable risk")
-            elif vol > 50:
-                signals.append("SELL"); reasons.append(f"High volatility ({vol:.0f}% ann.) – risk elevated")
+            if vola < 20:
+                signals.append("BUY_CALL"); reasons.append(f"Low vol {vola:.0f}% — options cheap, good risk")
+            elif vola > 50:
+                signals.append("BUY_PUT"); reasons.append(f"High vol {vola:.0f}% — use spreads; premium elevated")
             else:
-                reasons.append(f"Moderate volatility ({vol:.0f}% ann.)")
+                reasons.append(f"Moderate vol {vola:.0f}%")
 
-            # Risk/reward check based on ATR
-            rr_ratio = (target_long - price) / (price - stop_loss_long) if (price - stop_loss_long) > 0 else 1
-            if rr_ratio >= 2.5:
-                signals.append("BUY"); reasons.append(f"Favorable R/R ratio ({rr_ratio:.1f}x)")
-            elif rr_ratio < 1.5:
-                signals.append("SELL"); reasons.append(f"Poor R/R ratio ({rr_ratio:.1f}x)")
+            # ATR-based risk assessment
+            atr_pct = atr / price * 100 if price > 0 else 2
+            if atr_pct < 1.5:
+                signals.append("BUY_CALL"); reasons.append(f"Tight ATR {atr_pct:.1f}% — defined risk on calls")
+            elif atr_pct > 4:
+                signals.append("BUY_PUT"); reasons.append(f"Wide ATR {atr_pct:.1f}% — high daily swings")
 
-            # Market cap risk
-            mkt_cap = safe_float(info.get("marketCap", 0))
-            if mkt_cap > 10e9:
-                reasons.append("Large-cap (lower risk)")
-            elif mkt_cap > 0:
-                reasons.append("Small-cap (higher risk)")
+            # 52-week position
+            h52 = ind.get("high_52w", 0)
+            l52 = ind.get("low_52w", 0)
+            if h52 > 0 and l52 > 0:
+                pos_52w = (price - l52) / (h52 - l52) * 100
+                if pos_52w > 80:
+                    reasons.append(f"Near 52W high ({pos_52w:.0f}%) — extended")
+                elif pos_52w < 20:
+                    reasons.append(f"Near 52W low ({pos_52w:.0f}%) — oversold")
 
-            buys = signals.count("BUY")
-            sells = signals.count("SELL")
-            conf = 60 + abs(buys - sells) * 10
+            calls = signals.count("BUY_CALL")
+            puts = signals.count("BUY_PUT")
+            conf = 60 + abs(calls - puts) * 8
+            stop_long = round(price - 2 * atr, 2)
+            stop_short = round(price + 2 * atr, 2)
+            tgt_long = round(price + 3 * atr, 2)
+            tgt_short = round(price - 3 * atr, 2)
 
-            vote = "BUY" if buys > sells else "SELL" if sells > buys else "HOLD"
-            return {
-                "agent": self.name, "emoji": self.emoji, "vote": vote,
-                "confidence": round(min(conf, 90), 1),
-                "reason": " | ".join(reasons[:3]),
-                "stop_loss_long": round(stop_loss_long, 2),
-                "stop_loss_short": round(stop_loss_short, 2),
-                "target_long": round(target_long, 2),
-                "target_short": round(target_short, 2),
-                "atr": round(atr, 2),
-                "volatility_pct": round(vol, 1),
+            base = {
+                "stop_loss_long": stop_long, "stop_loss_short": stop_short,
+                "target_long": tgt_long, "target_short": tgt_short,
+                "atr": round(atr, 3), "volatility_pct": round(vola, 1),
             }
+            r = " | ".join(reasons[:3])
+            if calls > puts:
+                return {**_vote(self.name, self.emoji, "BUY_CALL", conf, r), **base}
+            elif puts > calls:
+                return {**_vote(self.name, self.emoji, "BUY_PUT", conf, r), **base}
+            return {**_hold(self.name, self.emoji, r), **base}
         except Exception as e:
-            return {"agent": self.name, "emoji": self.emoji, "vote": "HOLD",
-                    "confidence": 50.0, "reason": f"Error: {e}",
+            return {**_hold(self.name, self.emoji, f"Error: {e}"),
                     "stop_loss_long": 0, "stop_loss_short": 0,
-                    "target_long": 0, "target_short": 0, "atr": 0, "volatility_pct": 0}
+                    "target_long": 0, "target_short": 0,
+                    "atr": 0, "volatility_pct": 25}
 
 
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 # 8. JUDGE AGENT
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
 class JudgeAgent:
     name = "Judge Agent"
     emoji = "⚖️"
-    AGREEMENT_THRESHOLD = 6
+    THRESHOLD = 6  # Need 6 of 8 (7 analysts + judge = 8 total logic path)
 
-    def decide(self, votes: list[dict], price: float, risk_data: dict) -> dict:
-        buy_count = sum(1 for v in votes if v["vote"] == "BUY")
-        sell_count = sum(1 for v in votes if v["vote"] == "SELL")
+    def decide(self, votes: list[dict], ind: dict) -> dict:
+        price = ind.get("price", 0)
+        atr = ind.get("atr14", price * 0.02) if price else 1
+
+        call_count = sum(1 for v in votes if v["vote"] == "BUY_CALL")
+        put_count = sum(1 for v in votes if v["vote"] == "BUY_PUT")
         hold_count = sum(1 for v in votes if v["vote"] == "HOLD")
-        total = len(votes)
 
-        agreed_buy = [v for v in votes if v["vote"] == "BUY"]
-        agreed_sell = [v for v in votes if v["vote"] == "SELL"]
-        disagreed = [v for v in votes if v["vote"] == "HOLD"]
+        risk = next((v for v in votes if v["agent"] == "Risk Agent"), {})
 
-        avg_confidence = np.mean([v.get("confidence", 50) for v in votes])
-
-        if buy_count >= self.AGREEMENT_THRESHOLD:
-            signal = "BUY"
-            agreed = agreed_buy
-            conf = np.mean([v["confidence"] for v in agreed_buy])
+        if call_count >= self.THRESHOLD:
+            signal = "BUY_CALL"
+            agreed = [v["agent"] for v in votes if v["vote"] == "BUY_CALL"]
+            disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_CALL"]
+            conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_CALL"]))
             entry = price
-            stop = risk_data.get("stop_loss_long", price * 0.95)
-            target = risk_data.get("target_long", price * 1.08)
-            disagreed_agents = [v["agent"] for v in votes if v["vote"] != "BUY"]
-            agreed_agents = [v["agent"] for v in votes if v["vote"] == "BUY"]
-        elif sell_count >= self.AGREEMENT_THRESHOLD:
-            signal = "SELL"
-            agreed = agreed_sell
-            conf = np.mean([v["confidence"] for v in agreed_sell])
+            stop = risk.get("stop_loss_long", price - 2 * atr)
+            target = risk.get("target_long", price + 3 * atr)
+        elif put_count >= self.THRESHOLD:
+            signal = "BUY_PUT"
+            agreed = [v["agent"] for v in votes if v["vote"] == "BUY_PUT"]
+            disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_PUT"]
+            conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_PUT"]))
             entry = price
-            stop = risk_data.get("stop_loss_short", price * 1.05)
-            target = risk_data.get("target_short", price * 0.92)
-            disagreed_agents = [v["agent"] for v in votes if v["vote"] != "SELL"]
-            agreed_agents = [v["agent"] for v in votes if v["vote"] == "SELL"]
+            stop = risk.get("stop_loss_short", price + 2 * atr)
+            target = risk.get("target_short", price - 3 * atr)
         else:
             signal = "HOLD"
-            conf = avg_confidence
+            agreed = []
+            disagreed = []
+            conf = float(np.mean([v["confidence"] for v in votes]))
             entry = price
-            stop = risk_data.get("stop_loss_long", price * 0.95)
+            stop = risk.get("stop_loss_long", price - 2 * atr)
             target = price
-            disagreed_agents = []
-            agreed_agents = []
 
-        position_size_pct = 5 if signal != "HOLD" else 0
-        if risk_data.get("volatility_pct", 30) > 40:
-            position_size_pct = max(position_size_pct - 2, 1)
+        # Options recommendations
+        direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
+        opts = suggest_options(direction, price, atr, ind)
+
+        # Forecast candles (project N daily candles forward for chart)
+        forecast = []
+        import time
+        now_ts = int(time.time())
+        interval = 86400  # 1 day
+        proj_price = price
+        for i in range(1, 8):
+            if signal == "BUY_CALL":
+                step = atr * 0.4  # daily expected move toward target
+                proj_price = min(proj_price + step, target)
+            elif signal == "BUY_PUT":
+                step = atr * 0.4
+                proj_price = max(proj_price - step, target)
+            forecast.append({"time": now_ts + i * interval, "value": round(proj_price, 2)})
+
+        vola = ind.get("volatility_pct", 25) if isinstance(ind, dict) else 25
+        pos_size = max(1, 5 - int(vola / 15))  # smaller size in high vol
 
         return {
             "signal": signal,
-            "confidence": round(float(conf), 1),
-            "entry_price": round(float(entry), 2),
-            "stop_loss": round(float(stop), 2),
-            "target_price": round(float(target), 2),
-            "agreed_agents": agreed_agents,
-            "disagreed_agents": disagreed_agents,
-            "vote_tally": {"BUY": buy_count, "SELL": sell_count, "HOLD": hold_count},
-            "position_size_pct": position_size_pct,
+            "confidence": round(conf, 1),
+            "entry_price": round(entry, 2),
+            "stop_loss": round(stop, 2),
+            "target_price": round(target, 2),
+            "agreed_agents": agreed,
+            "disagreed_agents": disagreed,
+            "vote_tally": {"BUY_CALL": call_count, "BUY_PUT": put_count, "HOLD": hold_count},
+            "position_size_pct": pos_size,
             "judge_reason": (
-                f"{buy_count}/8 agents voted BUY, {sell_count}/8 SELL — "
-                f"{'Consensus reached' if signal != 'HOLD' else 'No consensus (need 6/8)'}"
+                f"{call_count}/7 CALL, {put_count}/7 PUT — "
+                f"{'✅ CONSENSUS REACHED' if signal != 'HOLD' else '⏳ No consensus (need 6/7)'}"
             ),
+            "forecast_line": forecast,
+            # Options details from Hop
+            "action": opts["action"],
+            "strike_hint": opts["strike_hint"],
+            "expiry_hint": opts["expiry_hint"],
+            "entry_trigger": opts["entry_trigger"],
+            "risk_note": opts["risk_note"],
         }

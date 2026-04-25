@@ -270,3 +270,54 @@ def get_accuracy_stats() -> dict:
     accuracy = correct / total if total > 0 else 0
     breakdown = {r["signal"]: {"total": r["total"], "correct": r["correct"] or 0} for r in by_signal}
     return {"total": total, "correct": correct, "accuracy": round(accuracy, 4), "by_signal": breakdown}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LearningSystem class — wraps module functions for clean server.py interface
+# ─────────────────────────────────────────────────────────────────────────────
+class LearningSystem:
+    """Unified interface for prediction tracking and agent weight management."""
+
+    def __init__(self):
+        init_db()
+
+    def get_weights(self) -> dict:
+        """Return {agent_name: weight_float}."""
+        weights_data = get_agent_weights()
+        return {name: info["weight"] for name, info in weights_data.items()}
+
+    def save_prediction(
+        self, symbol: str, signal: str, confidence: float,
+        entry_price: float, target_price: float, stop_loss: float,
+        agent_votes: dict,
+    ) -> int:
+        """Save a prediction using flat parameters instead of nested judgment dict."""
+        judgment = {
+            "signal": signal,
+            "confidence": confidence,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "target_price": target_price,
+            "vote_tally": {},
+        }
+        # Convert agent_votes dict {agent_name: vote} to list for legacy format
+        votes_list = [{"agent": k, "vote": v, "confidence": 70} for k, v in (agent_votes or {}).items()]
+        return save_prediction(symbol, judgment, votes_list)
+
+    def verify_outcomes(self, symbol: str, current_price: float):
+        """Check and update outcomes for old predictions."""
+        try:
+            check_and_update_outcomes(symbol, current_price)
+        except Exception as e:
+            logger.warning(f"verify_outcomes error: {e}")
+
+    def get_accuracy_report(self) -> dict:
+        """Full accuracy report including per-agent weights."""
+        stats = get_accuracy_stats()
+        weights = get_agent_weights()
+        return {"overall": stats, "agents": weights}
+
+    def get_history(self, symbol: str) -> dict:
+        """Recent prediction history for a symbol."""
+        preds = get_recent_predictions(symbol, limit=20)
+        return {"symbol": symbol, "history": preds}
