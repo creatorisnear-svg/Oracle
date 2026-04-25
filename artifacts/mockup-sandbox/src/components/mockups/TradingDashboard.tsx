@@ -365,6 +365,11 @@ export default function TradingDashboard() {
   const wsRef = useRef<WebSocket | null>(null);
   const symRef = useRef<string>("");
   const periodRef = useRef<string>("3mo");
+  // Live-tick streaming: keep the most recent candle in memory and the bar
+  // interval (seconds) so we can mutate its high/low/close as live ticks
+  // arrive — and roll into a fresh candle when the bar boundary is crossed.
+  const lastCandleRef = useRef<{ time: number; open: number; high: number; low: number; close: number } | null>(null);
+  const barIntervalSecRef = useRef<number>(86400);
 
   // ── Chart setup ─────────────────────────────────────────────────────────
   const loadChart = useCallback(async (sym: string, p: string) => {
@@ -410,6 +415,27 @@ export default function TradingDashboard() {
       });
       candle.setData(data.candles);
       candleRef.current = candle;
+
+      // Snapshot the latest candle + bar interval for live-tick streaming.
+      // The interval is inferred from the spacing of the last two bars (in
+      // seconds): 5m = 300, 15m = 900, daily = 86400. With this, an arriving
+      // live_price tick can either MUTATE the current bar (high/low/close)
+      // or START a new one when the bar boundary rolls.
+      const cs = data.candles;
+      if (cs.length) {
+        const last = cs[cs.length - 1];
+        lastCandleRef.current = {
+          time: Number(last.time),
+          open: Number(last.open),
+          high: Number(last.high),
+          low:  Number(last.low),
+          close:Number(last.close),
+        };
+        if (cs.length >= 2) {
+          const dt = Number(cs[cs.length - 1].time) - Number(cs[cs.length - 2].time);
+          if (dt > 0 && dt < 30 * 86400) barIntervalSecRef.current = dt;
+        }
+      }
 
       // ── Past prediction markers (+ for CALL, − for PUT) ───────────────
       // Pulls every prior signal we logged for this symbol and pins a marker
@@ -930,7 +956,38 @@ export default function TradingDashboard() {
 
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data);
-      if (msg.type === "live_price") setLivePrice(msg);
+      if (msg.type === "live_price") {
+        setLivePrice(msg);
+        // ── Stream the tick into the latest candle so the chart actually
+        // moves with the market instead of being a static snapshot. If the
+        // tick arrived inside the current bar's window, mutate close + extend
+        // high/low. If a new bar window has started, append a fresh candle.
+        const px = Number(msg.price);
+        const cR = candleRef.current;
+        const last = lastCandleRef.current;
+        if (cR && last && Number.isFinite(px) && px > 0) {
+          const intv = barIntervalSecRef.current || 86400;
+          const nowSec = Math.floor(Date.now() / 1000);
+          const barStart = Math.floor(nowSec / intv) * intv;
+          if (barStart > last.time) {
+            // Roll a new bar — opens at previous close, no high/low yet
+            const fresh = { time: barStart, open: last.close, high: px, low: px, close: px };
+            try { cR.update(fresh); } catch {}
+            lastCandleRef.current = fresh;
+          } else {
+            // Mutate the current bar in place
+            const upd = {
+              time: last.time,
+              open: last.open,
+              high: Math.max(last.high, px),
+              low:  Math.min(last.low,  px),
+              close: px,
+            };
+            try { cR.update(upd); } catch {}
+            lastCandleRef.current = upd;
+          }
+        }
+      }
       else if (msg.type === "status") setStatus(msg.message);
       else if (msg.type === "judgment") {
         if (msg.votes?.length) setVotes(msg.votes);
