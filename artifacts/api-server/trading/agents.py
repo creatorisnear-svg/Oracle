@@ -173,6 +173,43 @@ class PriceActionAgent:
             if ichi == "bullish": signals.append("BUY_CALL"); reasons.append("Above Ichimoku cloud")
             elif ichi == "bearish": signals.append("BUY_PUT"); reasons.append("Below Ichimoku cloud")
 
+            # NEW: Donchian Channel breakout (Turtle Trader rules — 20-day high/low)
+            don = ind.get("donchian") or {}
+            if don.get("break") == "bullish":
+                signals.append("BUY_CALL"); reasons.append(f"Donchian 20d high break ${don.get('upper')}")
+            elif don.get("break") == "bearish":
+                signals.append("BUY_PUT"); reasons.append(f"Donchian 20d low break ${don.get('lower')}")
+
+            # NEW: Keltner Channel breakout (EMA20 ± 2×ATR — strong trend signal)
+            kel = ind.get("keltner") or {}
+            if kel.get("break") == "bullish":
+                signals.append("BUY_CALL"); reasons.append("Keltner upper break (trend strength)")
+            elif kel.get("break") == "bearish":
+                signals.append("BUY_PUT"); reasons.append("Keltner lower break (trend weakness)")
+
+            # NEW: Head & Shoulders / Inverse H&S
+            hs = ind.get("head_shoulders", "none")
+            if hs == "bullish_inverse":
+                signals.append("BUY_CALL"); reasons.append("Inverse H&S neckline break")
+            elif hs == "bearish_top":
+                signals.append("BUY_PUT"); reasons.append("H&S top neckline break")
+
+            # NEW: Fibonacci bounce signal
+            # Price within 0.7% of fib 38.2 / 50 / 61.8 with confirming candle
+            near_fib = float(ind.get("near_fib_level") or 0)
+            if near_fib > 0:
+                dist_pct = abs(c - near_fib) / c * 100
+                if dist_pct < 0.7:  # close to a key fib level
+                    fib = ind.get("fibonacci") or {}
+                    is_golden = abs(near_fib - fib.get("fib_618", 0)) < 0.01 \
+                                or abs(near_fib - fib.get("fib_500", 0)) < 0.01 \
+                                or abs(near_fib - fib.get("fib_382", 0)) < 0.01
+                    if is_golden:
+                        if c > o and lw > 0.3:  # bullish reversal candle off support
+                            signals.append("BUY_CALL"); reasons.append(f"Fib bounce ${near_fib:.2f}")
+                        elif c < o and uw > 0.3:  # bearish rejection at fib
+                            signals.append("BUY_PUT"); reasons.append(f"Fib reject ${near_fib:.2f}")
+
             # NEW: Relative strength vs SPY
             # If this stock outperformed SPY by >0.6% today → bullish RS,
             # underperformed by >0.6% → bearish RS. Strong directional edge
@@ -1235,6 +1272,34 @@ class JudgeAgent:
             consensus_factor = 0.55 + 0.45 * (agree_n / total_analysts)
             conf *= consensus_factor
 
+        # ── Disagreement detection ──────────────────────────────────
+        # When CALL and PUT camps are nearly tied, the system is genuinely
+        # confused and the signal is fragile. Penalise these "close-vote" cases.
+        if signal != "HOLD" and total_analysts > 0:
+            opp_n = put_count if signal == "BUY_CALL" else call_count
+            split_ratio = opp_n / max(call_count + put_count, 1)
+            if split_ratio >= 0.40:
+                # Camps within 60/40 — high disagreement, fade conviction
+                conf *= 0.78
+            elif split_ratio >= 0.30:
+                conf *= 0.90
+
+        # ── Market regime context ───────────────────────────────────
+        # In risk-off (VIX > 28) PUTs are statistically favoured;
+        # in clean bull regimes CALLs tend to win. Apply a small nudge.
+        regime = ind.get("market_regime") or {}
+        regime_label = regime.get("label", "unknown")
+        if signal == "BUY_CALL":
+            if regime_label == "bull":
+                conf *= 1.04
+            elif regime_label in ("bear", "risk-off"):
+                conf *= 0.90
+        elif signal == "BUY_PUT":
+            if regime_label in ("bear", "risk-off"):
+                conf *= 1.04
+            elif regime_label == "bull":
+                conf *= 0.90
+
         conf = max(40.0, min(95.0, conf))
 
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
@@ -1351,6 +1416,7 @@ class JudgeAgent:
                 "adx": round(adx, 1),
                 "weekly_trend": weekly,
                 "spy_trend": spy,
+                "regime": regime,
             },
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],

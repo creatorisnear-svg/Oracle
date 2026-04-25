@@ -201,6 +201,42 @@ def _spy_trend() -> dict:
     return result
 
 
+def _market_regime() -> dict:
+    """Classify the broad market into bull / bear / sideways / risk-off.
+    Uses SPY 50/200 EMA cross + VIX level. Cached 5 min."""
+    key = ("__MKT__", "regime")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 300:
+        return cached[0]
+    try:
+        sdf = yf.Ticker("SPY").history(period="1y", interval="1d")
+        vdf = yf.Ticker("^VIX").history(period="1mo", interval="1d")
+        if sdf.empty or len(sdf) < 200:
+            result = {"label": "unknown", "vix": 0.0, "spy_above_200ema": False}
+        else:
+            closes = sdf["Close"].values
+            ema50 = pd.Series(closes).ewm(span=50).mean().values
+            ema200 = pd.Series(closes).ewm(span=200).mean().values
+            price = float(closes[-1])
+            vix = float(vdf["Close"].values[-1]) if not vdf.empty else 18.0
+            above200 = price > float(ema200[-1])
+            golden = float(ema50[-1]) > float(ema200[-1])
+            if vix > 28:
+                label = "risk-off"
+            elif golden and above200:
+                label = "bull"
+            elif (not golden) and (not above200):
+                label = "bear"
+            else:
+                label = "sideways"
+            result = {"label": label, "vix": round(vix, 1),
+                      "spy_above_200ema": above200, "golden_cross": golden}
+    except Exception:
+        result = {"label": "unknown", "vix": 0.0, "spy_above_200ema": False}
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
 def run_agents_sync(sym: str, df: pd.DataFrame, info: dict):
     ind = compute_all_indicators(df)
     ind["_symbol"] = sym
@@ -208,7 +244,8 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict):
     # ── Higher-TF & market-context filters (accuracy boosters) ─────
     ind["weekly_trend"] = _weekly_trend(sym)
     # Skip the SPY-vs-SPY tautology when analysing SPY itself
-    ind["spy_trend"] = {"dir": "self", "pct_from_ema50": 0.0} if sym == "SPY" else _spy_trend()
+    ind["spy_trend"] = {"dir": "self", "pct_from_ema50": 0.0, "change_1d": 0.0} if sym == "SPY" else _spy_trend()
+    ind["market_regime"] = _market_regime()
     weights = LEARNING.get_weights()
     votes = []
     for agent in AGENTS:

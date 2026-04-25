@@ -315,6 +315,94 @@ def detect_rsi_divergence(closes, rsi_vals, lookback=20):
     return "none"
 
 
+# ─── NEW: Donchian Channels ───────────────────────────────────────────────────
+def compute_donchian(highs, lows, closes, period=20):
+    """20-day high/low channel. Breakouts = trend-follow signals (Turtle rules)."""
+    n = len(closes)
+    if n < period + 1:
+        return {"upper": float(closes[-1]), "lower": float(closes[-1]),
+                "mid": float(closes[-1]), "break": "none"}
+    upper = float(np.max(highs[-period-1:-1]))   # rolling max EXCLUDING today
+    lower = float(np.min(lows[-period-1:-1]))    # rolling min EXCLUDING today
+    mid = (upper + lower) / 2
+    c = float(closes[-1])
+    brk = "none"
+    if c > upper:
+        brk = "bullish"
+    elif c < lower:
+        brk = "bearish"
+    return {"upper": round(upper, 2), "lower": round(lower, 2),
+            "mid": round(mid, 2), "break": brk}
+
+
+# ─── NEW: Keltner Channels ────────────────────────────────────────────────────
+def compute_keltner(closes, atr_vals, period=20, mult=2.0):
+    """EMA20 ± 2×ATR. Trend channel — closes outside = strong directional move."""
+    if len(closes) < period:
+        return {"upper": float(closes[-1]), "lower": float(closes[-1]),
+                "mid": float(closes[-1]), "break": "none"}
+    ema = pd.Series(closes).ewm(span=period, adjust=False).mean().values
+    a = float(atr_vals[-1])
+    m = float(ema[-1])
+    upper = m + mult * a
+    lower = m - mult * a
+    c = float(closes[-1])
+    brk = "none"
+    if c > upper:
+        brk = "bullish"
+    elif c < lower:
+        brk = "bearish"
+    return {"upper": round(upper, 2), "lower": round(lower, 2),
+            "mid": round(m, 2), "break": brk}
+
+
+# ─── NEW: Head & Shoulders (and inverse) detection ────────────────────────────
+def detect_head_shoulders(highs, lows, closes, lookback=40):
+    """
+    Classic 5-pivot pattern.
+    H&S top:    LS_high < Head_high > RS_high, shoulders within ~3% of each other,
+                neckline = avg of the two troughs, breakdown when close < neckline.
+    Inverse:    mirror of above.
+    Returns "bearish_top", "bullish_inverse", or "none".
+    """
+    n = len(closes)
+    if n < lookback:
+        return "none"
+    h = highs[-lookback:]
+    l = lows[-lookback:]
+    c = closes[-1]
+
+    # find local peaks/troughs (window = 3)
+    peaks = [i for i in range(2, len(h)-2) if h[i] > h[i-1] and h[i] > h[i-2]
+             and h[i] > h[i+1] and h[i] > h[i+2]]
+    troughs = [i for i in range(2, len(l)-2) if l[i] < l[i-1] and l[i] < l[i-2]
+               and l[i] < l[i+1] and l[i] < l[i+2]]
+
+    # H&S top: 3 peaks with middle highest, 2 troughs between them
+    if len(peaks) >= 3 and len(troughs) >= 2:
+        p3 = peaks[-3:]
+        if h[p3[1]] > h[p3[0]] and h[p3[1]] > h[p3[2]] \
+           and abs(h[p3[0]] - h[p3[2]]) / h[p3[1]] < 0.04:
+            inner_troughs = [t for t in troughs if p3[0] < t < p3[2]]
+            if len(inner_troughs) >= 2:
+                neckline = (l[inner_troughs[0]] + l[inner_troughs[-1]]) / 2
+                if c < neckline:
+                    return "bearish_top"
+
+    # Inverse H&S: 3 troughs with middle lowest, 2 peaks between
+    if len(troughs) >= 3 and len(peaks) >= 2:
+        t3 = troughs[-3:]
+        if l[t3[1]] < l[t3[0]] and l[t3[1]] < l[t3[2]] \
+           and abs(l[t3[0]] - l[t3[2]]) / l[t3[1]] < 0.04:
+            inner_peaks = [p for p in peaks if t3[0] < p < t3[2]]
+            if len(inner_peaks) >= 2:
+                neckline = (h[inner_peaks[0]] + h[inner_peaks[-1]]) / 2
+                if c > neckline:
+                    return "bullish_inverse"
+
+    return "none"
+
+
 # ─── Composite Indicator Bundle ────────────────────────────────────────────────
 def compute_all_indicators(df: pd.DataFrame) -> dict:
     closes = df["Close"].values.astype(float)
@@ -341,6 +429,9 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
     fibonacci = compute_fibonacci(highs, lows)
     pivots = compute_pivot_levels(highs, lows, closes)
     rsi_div = detect_rsi_divergence(closes, rsi)
+    donchian = compute_donchian(highs, lows, closes)
+    keltner = compute_keltner(closes, atr)
+    head_shoulders = detect_head_shoulders(highs, lows, closes)
 
     # Volume stats
     avg_vol_20 = np.mean(volumes[-20:]) if n >= 20 else np.mean(volumes) if n > 0 else 1
@@ -457,6 +548,9 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "pivot_bias": pivot_bias,
         "rsi_divergence": rsi_div,
         "stoch_k": safe_float(stoch[-1]),
+        "donchian": donchian,
+        "keltner": keltner,
+        "head_shoulders": head_shoulders,
     }
 
 

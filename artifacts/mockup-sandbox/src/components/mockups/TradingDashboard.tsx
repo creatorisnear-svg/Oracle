@@ -40,12 +40,13 @@ interface Judgment {
   evidence_reason?: string | null;
   evidence_pillars?: {
     trend: boolean; momentum: boolean; volume: boolean; price: boolean;
-    aligned: number; total: number;
+    aligned: number; total: number; score?: number;
   } | null;
   macro_context?: {
     adx: number;
     weekly_trend: { dir: "up" | "down" | "flat" | "self"; strength: number; ema20?: number };
-    spy_trend: { dir: "up" | "down" | "flat" | "self"; pct_from_ema50: number };
+    spy_trend: { dir: "up" | "down" | "flat" | "self"; pct_from_ema50: number; change_1d?: number };
+    regime?: { label: string; vix: number; spy_above_200ema?: boolean; golden_cross?: boolean };
   } | null;
   action: string; strike_hint: string; expiry_hint: string;
   expiry_weekly: string; expiry_biweekly: string; expiry_monthly: string;
@@ -861,7 +862,7 @@ export default function TradingDashboard() {
                     {judgment.macro_context && (
                       <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5">
                         <div className="text-xs text-slate-500 font-semibold">MACRO CONTEXT</div>
-                        <div className="grid grid-cols-3 gap-1.5 text-[11px]">
+                        <div className="grid grid-cols-4 gap-1.5 text-[11px]">
                           {(() => {
                             const adx = judgment.macro_context.adx;
                             const adxOk = adx >= 18;
@@ -906,6 +907,27 @@ export default function TradingDashboard() {
                               <div className={`flex flex-col items-center justify-center rounded px-1.5 py-1 border ${cls}`}>
                                 <span className="text-[10px] uppercase opacity-70">SPY</span>
                                 <span className="font-mono font-bold">{arrow} {s.pct_from_ema50.toFixed(1)}%</span>
+                              </div>
+                            );
+                          })()}
+                          {(() => {
+                            const r = judgment.macro_context.regime;
+                            if (!r) {
+                              return (
+                                <div className="flex flex-col items-center justify-center rounded px-1.5 py-1 border bg-slate-700/30 border-slate-600/40 text-slate-400">
+                                  <span className="text-[10px] uppercase opacity-70">Regime</span>
+                                  <span className="font-mono font-bold">—</span>
+                                </div>
+                              );
+                            }
+                            const cls = r.label === "bull" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                                      : r.label === "bear" ? "bg-red-500/10 border-red-500/30 text-red-300"
+                                      : r.label === "risk-off" ? "bg-orange-500/10 border-orange-500/30 text-orange-300"
+                                      : "bg-slate-700/30 border-slate-600/40 text-slate-400";
+                            return (
+                              <div className={`flex flex-col items-center justify-center rounded px-1.5 py-1 border ${cls}`} title={`VIX ${r.vix}`}>
+                                <span className="text-[10px] uppercase opacity-70">Regime</span>
+                                <span className="font-mono font-bold uppercase">{r.label}</span>
                               </div>
                             );
                           })()}
