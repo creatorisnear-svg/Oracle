@@ -395,6 +395,24 @@ Every signal includes a `kelly` field with regime-aware position sizing:
 - `artifacts/api-server: API Server` — Python FastAPI on PORT (port 8080)
 - `artifacts/mockup-sandbox: Component Preview Server` — React Vite on PORT (port 8081)
 
+## v6.7 — Meta-Judge: probability calibration + logistic stacker (`meta_judge.py`)
+
+The hand-crafted JudgeAgent's `confidence` field was a heuristic — a 70% conviction did not mean "70% of these have historically won". Added `meta_judge.py` which adds two complementary upgrades on top of the existing judge (both additive, both pass-through-safe when sample sizes are too low):
+
+**1. Isotonic confidence calibration**
+Reads resolved historical predictions, bins by (signal, raw_conf), fits a monotone-non-decreasing mapping `raw_conf → win_rate` using a pure-numpy Pool Adjacent Violators algorithm (no sklearn dep). Activates per-direction once ≥30 resolved samples accumulate. Squashes extremes to [5%, 95%] so we never publish absurd certainty.
+
+**2. Logistic stacker**
+Trains two tiny pure-numpy logistic regressions (one for BUY_CALL, one for BUY_PUT) on `(per-agent signed vote) → was_correct`. The stacker learns which COMBINATIONS of agent votes empirically predict wins — not just which individual agents are reliable, which is what the existing weighting captures. Activates at ≥50 resolved samples per direction. Output is BLENDED with the calibrated judge confidence, capped at 40% blend weight (the judge always retains a meaningful voice). Blend weight further scales with stacker/calibrator agreement so the stacker can't override the judge during regime shifts when its training data may be stale.
+
+**Wired into both REST and WebSocket analyze paths** in server.py via `meta_judge.apply_meta_judge(judgment, votes)` after `JUDGE.decide()`. The original judgment dict is mutated in place: `confidence` becomes the calibrated/blended value, and a `meta` field is added exposing `{raw_confidence, calibrated, stacker, blend_weight, final, applied}` for transparency. HOLD signals are short-circuited (no directional probability to calibrate).
+
+**Brier score in `/api/admin/calibration`** — exposes `raw_brier` vs `calibrated_brier` per signal so the user can see whether confidence numbers are getting more honest over time. A drop from 0.25 → 0.18 means meaningful calibration improvement.
+
+Frontend `Judgment` interface extended with optional `meta` field — pass-through safe, can be surfaced in the UI later as a "calibration honesty badge".
+
+Also fixed a regression in `_run_agents` (REST path) where the new horizon multiplier used `h_cfg["key"]` (a variable that only exists in the WS path) instead of the function's `horizon` parameter.
+
 ## v6.6 — "Object is disposed" runtime overlay fix + per-horizon agent calibration
 
 **Chart bug fix (TradingDashboard.tsx)**

@@ -77,6 +77,20 @@ interface Judgment {
     rating: "strong" | "good" | "weak" | "poor";
     note: string;
   } | null;
+  // Meta-judge calibration breakdown — present when the calibrator/stacker
+  // are active. Used by the dashboard to honestly show "the AI's stated
+  // confidence is now grounded in N historical wins" instead of pretending
+  // the raw heuristic number is a probability.
+  meta?: {
+    applied: boolean;
+    reason?: string;
+    raw_confidence?: number;
+    calibrated?: number | null;
+    stacker?: number | null;
+    blend_weight?: number;
+    final?: number;
+    error?: string;
+  } | null;
 }
 interface LivePrice {
   symbol: string; price: number; change_pct: number;

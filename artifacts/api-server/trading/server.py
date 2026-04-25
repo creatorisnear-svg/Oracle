@@ -81,6 +81,7 @@ LEARNING = LearningSystem()
 # Meta-learning: indicator-snapshot logging, per-regime weighting,
 # and AI-discovered strategy mining. See trading/meta_learning.py.
 import meta_learning  # noqa: E402
+import meta_judge  # noqa: E402
 meta_learning.bootstrap()
 
 # Live price cache  {symbol → {price, change_pct, ts, news}}
@@ -643,7 +644,9 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
         # final confidence is still clamped at 97 below).
         rw = regime_mults.get((agent.name, regime_label), 1.0)
         sw = symbol_mults.get((agent.name, sym), 1.0)
-        hw = horizon_mults.get((agent.name, h_cfg["key"]), 1.0)
+        # `horizon` here is the string key (e.g. "swing"); the WS path uses
+        # h_cfg["key"] which resolves to the same thing.
+        hw = horizon_mults.get((agent.name, horizon), 1.0)
         eff_w = w * rw * sw * hw
         vote["confidence"] = round(min(vote.get("confidence", 50) * eff_w, 97), 1)
         vote["weight"] = round(eff_w, 3)
@@ -1160,6 +1163,10 @@ def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
         df, info = get_df(sym, period=use_period, interval=use_interval)
         votes, ind = run_agents_sync(sym, df, info, horizon=h["key"])
         raw_judgment = JUDGE.decide(votes, ind)
+        # Meta-judge layer: isotonic calibration + logistic stacker. Replaces
+        # `confidence` with a calibrated probability when enough resolved
+        # samples have accumulated; otherwise pass-through. See meta_judge.py.
+        raw_judgment = meta_judge.apply_meta_judge(raw_judgment, votes)
 
         # Signal stickiness — keep an open trade plan locked unless target/stop
         # hit, the hold window elapsed, or a strong reversal fires (≥6/9).
@@ -1211,6 +1218,9 @@ def quick_signal(symbol: str):
         df, info = get_df(sym, period="1mo")
         votes, ind = run_agents_sync(sym, df, info)
         judgment = JUDGE.decide(votes, ind)
+        # Apply same meta-judge calibration as the full analyze path so the
+        # quick endpoint reports the same probability the dashboard would.
+        judgment = meta_judge.apply_meta_judge(judgment, votes)
         return {
             "symbol": sym,
             "signal": judgment["signal"],
@@ -1399,6 +1409,23 @@ def admin_discover_strategies():
         return {"ok": False, "error": str(e)}
 
 
+@app.get("/api/admin/calibration")
+def admin_calibration():
+    """Inspect the meta-judge calibration + stacker state.
+
+    Surfaces:
+      * `total_resolved`   – how many predictions have been graded
+      * `calibrator_active`/`stacker_active` – whether each layer has enough samples
+      * `by_signal.<sig>.raw_brier` vs `calibrated_brier` – Brier score before
+        and after calibration. Lower = more honest probabilities. A drop
+        from 0.25 → 0.18 is the model becoming meaningfully better-calibrated.
+    """
+    try:
+        return meta_judge.get_calibration_report()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/admin/learn/status")
 def admin_learn_status():
     """Inspect what the meta-learning layer currently knows."""
@@ -1515,6 +1542,9 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
 
         # 5. Judge
         raw_judgment = JUDGE.decide(votes, ind)
+        # Meta-judge: isotonic calibration + logistic stacker (additive,
+        # falls back gracefully when there isn't enough resolved history).
+        raw_judgment = meta_judge.apply_meta_judge(raw_judgment, votes)
 
         # Signal stickiness — see signal_persistence.py
         active = get_active_trade(sym, h_cfg["key"])
