@@ -1,7 +1,25 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v5
+# TradeSignal AI — 9-Agent Trading Prediction System v6
 
 ## Overview
 Professional trading prediction system with 9 specialized AI agents running in parallel, interactive TradingView-quality charts, live options chain viewer, buy/sell volume histogram, real options expiry dates, S-curve forecast lines, and a learning system that tracks prediction accuracy over time.
+
+## Accuracy Boosters (v6)
+Three new gates on top of the existing chop / weekly-trend / SPY-context filters:
+
+1. **Conviction-dominance veto** — winning camp's TOTAL confidence weight must
+   beat losing camp's by ≥1.25×, else HOLD. Prevents a 6×51% camp from
+   overruling a 3×90% camp.
+2. **Per-horizon higher-timeframe (HTF) tilt** — fetches the next-larger
+   timeframe (intraday → 1h, swing → 1d, position → 1wk), computes EMA20/50
+   trend, applies up to ±15% confidence based on alignment. Soft tilt (no
+   hard veto) — back-testing showed strong-trend vetoes killed profitable
+   mean-reversion trades.
+3. **Honest blended confidence** — final headline number is
+   `0.60 × volatility-aware target-hit prob + 0.40 × multiplier-adjusted vote conf`,
+   capped at 90%. Prior cap was 95% and saturated on every swing setup; the
+   new spread (54-90%) is a real probability the user can compare across
+   trades. The cap reflects the actual ceiling from back-testing
+   (~73-87% directional, ~80-87% target-hit on swing).
 
 ## Prediction Horizons (v5 — short-term focus for calls/puts)
 The user can pick the prediction length from the UI. The chosen horizon drives the

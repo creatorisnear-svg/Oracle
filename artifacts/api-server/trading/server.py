@@ -24,7 +24,7 @@ from agents import (
     PriceActionAgent, TechnicalAgent, VolumeAgent,
     SentimentAgent, OptionsFlowAgent, MomentumAgent,
     RiskAgent, FearGreedAgent, PoliticalAgent, JudgeAgent,
-    HORIZONS, get_horizon_config, DEFAULT_HORIZON,
+    HORIZONS, get_horizon_config, DEFAULT_HORIZON, compute_htf_trend,
 )
 from indicators import compute_all_indicators, safe_float
 from learning import LearningSystem
@@ -168,6 +168,27 @@ def _weekly_trend(symbol: str) -> dict:
             result = {"dir": direction, "strength": float(abs(slope_pct)), "ema20": e_now}
     except Exception:
         result = {"dir": "flat", "strength": 0.0, "ema20": 0.0}
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _horizon_htf_trend(symbol: str, horizon_key: str) -> dict:
+    """Per-horizon higher-timeframe trend.
+    Cached for 5 minutes per (symbol, horizon)."""
+    h_cfg = HORIZONS.get(horizon_key, HORIZONS[DEFAULT_HORIZON])
+    htf_period = h_cfg.get("htf_period", "6mo")
+    htf_interval = h_cfg.get("htf_interval", "1d")
+    key = (symbol, "htf", htf_period, htf_interval)
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 300:
+        return cached[0]
+    try:
+        hdf = yf.Ticker(symbol).history(period=htf_period, interval=htf_interval)
+        result = compute_htf_trend(hdf)
+        result["interval"] = htf_interval
+    except Exception:
+        result = {"direction": 0, "strength": 0.0, "label": "unknown",
+                  "interval": htf_interval}
     _DF_CACHE[key] = (result, None, time.time())
     return result
 
@@ -457,6 +478,9 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
     ind["_news"] = _LIVE_CACHE.get(sym, {}).get("news", [])
     # ── Higher-TF & market-context filters (accuracy boosters) ─────
     ind["weekly_trend"] = _weekly_trend(sym)
+    # Per-horizon higher-timeframe trend (the #1 alpha source — the bigger
+    # picture vetoes counter-trend trades on the current horizon)
+    ind["_htf_trend"] = _horizon_htf_trend(sym, horizon)
     # Skip the SPY-vs-SPY tautology when analysing SPY itself
     ind["spy_trend"] = {"dir": "self", "pct_from_ema50": 0.0, "change_1d": 0.0} if sym == "SPY" else _spy_trend()
     ind["market_regime"] = _market_regime()
@@ -1098,6 +1122,11 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
         ind["_symbol"] = sym
         ind["_horizon"] = h_cfg["key"]
         ind["_news"] = live.get("news", [])
+        # Per-horizon higher-timeframe trend gate
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            ind["_htf_trend"] = await loop.run_in_executor(
+                pool, _horizon_htf_trend, sym, h_cfg["key"]
+            )
         weights = LEARNING.get_weights()
 
         await websocket.send_text(json.dumps({

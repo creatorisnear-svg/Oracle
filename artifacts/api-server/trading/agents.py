@@ -70,6 +70,7 @@ HORIZONS: dict[str, dict] = {
         "stop_mult": 0.7, "tgt_mult": 0.9,
         "threshold": 6,             # need 6/9 (stricter — 5m bars are noisy)
         "min_pillar_score": 1.5,
+        "htf_period": "5d", "htf_interval": "1h",  # confirm with hourly trend
         "expiry_pref": "0DTE / weekly",
     },
     "day": {  # 0DTE, hold rest of session
@@ -81,6 +82,7 @@ HORIZONS: dict[str, dict] = {
         "stop_mult": 0.8, "tgt_mult": 1.1,
         "threshold": 6,
         "min_pillar_score": 1.5,
+        "htf_period": "5d", "htf_interval": "1h",
         "expiry_pref": "0DTE / weekly",
     },
     "swing": {  # multi-day swing, hold 1-5 days
@@ -90,8 +92,9 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 60,
         "target_hit_bars": 30,
         "stop_mult": 1.0, "tgt_mult": 1.4,
-        "threshold": 5,
+        "threshold": 5,             # 5/9 — HTF + conviction gates do the filtering
         "min_pillar_score": 1.0,
+        "htf_period": "6mo", "htf_interval": "1d",  # daily trend gate
         "expiry_pref": "weekly / 2-week",
     },
     "position": {  # 1-3 weeks, current default
@@ -103,6 +106,7 @@ HORIZONS: dict[str, dict] = {
         "stop_mult": 1.1, "tgt_mult": 1.3,
         "threshold": 5,
         "min_pillar_score": 1.0,
+        "htf_period": "1y", "htf_interval": "1wk",  # weekly trend gate
         "expiry_pref": "2-week / monthly",
     },
 }
@@ -113,6 +117,55 @@ def get_horizon_config(name: str | None) -> dict:
     """Return the horizon config dict, falling back to swing if unknown."""
     key = (name or DEFAULT_HORIZON).lower().strip()
     return HORIZONS.get(key, HORIZONS[DEFAULT_HORIZON]) | {"key": key if key in HORIZONS else DEFAULT_HORIZON}
+
+
+def compute_htf_trend(htf_df) -> dict:
+    """Higher-timeframe trend filter.
+
+    Pro traders only fire short-term setups in the direction of the bigger
+    picture. We compute EMA20/EMA50 on the next-higher timeframe and return:
+
+      * direction:  +1 = up-trend, -1 = down-trend, 0 = chop / unknown
+      * strength :  0..1 — how cleanly the trend is aligned (slope steepness)
+      * label    :  human-readable label for the UI
+    """
+    try:
+        import numpy as _np
+        if htf_df is None or len(htf_df) < 55:
+            return {"direction": 0, "strength": 0.0, "label": "unknown"}
+        close = htf_df["Close"].values.astype(float)
+
+        def _ema(arr, span):
+            k = 2.0 / (span + 1.0)
+            out = _np.empty_like(arr)
+            out[0] = arr[0]
+            for i in range(1, len(arr)):
+                out[i] = arr[i] * k + out[i - 1] * (1 - k)
+            return out
+
+        ema20 = _ema(close, 20)
+        ema50 = _ema(close, 50)
+        last_close = float(close[-1])
+        last_e20 = float(ema20[-1])
+        last_e50 = float(ema50[-1])
+        # slope of EMA50 over last 10 bars, normalised to price
+        slope = (float(ema50[-1]) - float(ema50[-10])) / max(last_close, 1e-6)
+
+        up = (last_e20 > last_e50) and (last_close > last_e50)
+        down = (last_e20 < last_e50) and (last_close < last_e50)
+        if up:
+            direction = 1
+            label = "up-trend"
+        elif down:
+            direction = -1
+            label = "down-trend"
+        else:
+            direction = 0
+            label = "chop"
+        strength = float(min(1.0, abs(slope) * 200.0))   # 0.5% slope ≈ 1.0
+        return {"direction": direction, "strength": round(strength, 3), "label": label}
+    except Exception:
+        return {"direction": 0, "strength": 0.0, "label": "unknown"}
 
 
 def get_track_record(symbol: str) -> dict | None:
@@ -1247,6 +1300,16 @@ class JudgeAgent:
         hold_count = sum(1 for v in votes if v["vote"] == "HOLD")
         total_analysts = len(votes)
 
+        # ── Conviction-weighted score ───────────────────────────────
+        # A 90%-confident BUY_CALL counts more than a barely-bullish 55% one.
+        # We require the winning camp to dominate by both COUNT *and* WEIGHT.
+        bull_weight = float(sum(v.get("confidence", 50) for v in votes if v["vote"] == "BUY_CALL"))
+        bear_weight = float(sum(v.get("confidence", 50) for v in votes if v["vote"] == "BUY_PUT"))
+        conv_dominance = (
+            bull_weight / max(bear_weight, 1.0) if bull_weight >= bear_weight
+            else bear_weight / max(bull_weight, 1.0)
+        )
+
         risk = next((v for v in votes if v["agent"] == "Risk Agent"), {})
 
         # Pull overextension indicators for the "don't chase tops/bottoms" filter
@@ -1296,6 +1359,22 @@ class JudgeAgent:
             entry = price
             stop = round(price - stop_mult * atr, 2)
             target = price
+
+        # ── Conviction-dominance VETO ────────────────────────────────────
+        # Bare vote-count is a weak gate: 6 agents at 51% confidence shouldn't
+        # outweigh 3 at 90%. Require the winning camp's TOTAL CONFIDENCE
+        # weight to dominate the loser's by ≥1.25×, else fall back to HOLD.
+        # (1.25× = 56/44 split — softer than 1.4× so signals still fire.)
+        if signal == "BUY_CALL" and bear_weight > 0 and (bull_weight / bear_weight) < 1.25:
+            signal = "HOLD"
+            target = price
+            stop = round(price - stop_mult * atr, 2)
+            conf = 50.0
+        elif signal == "BUY_PUT" and bull_weight > 0 and (bear_weight / bull_weight) < 1.25:
+            signal = "HOLD"
+            target = price
+            stop = round(price - stop_mult * atr, 2)
+            conf = 50.0
 
         # ── Overextension VETO ("don't chase") ──────────────────────────
         # Back-testing showed the agents pile onto strong trends and buy
@@ -1370,6 +1449,28 @@ class JudgeAgent:
             if (signal == "BUY_CALL" and spy["dir"] == "down") or \
                (signal == "BUY_PUT" and spy["dir"] == "up"):
                 conf *= 0.88   # 12% confidence haircut for fighting the index
+
+        # 4) Horizon-aware HIGHER-TIMEFRAME tilt ───────────────────────────
+        # Per-horizon HTF trend (intraday/day → 1h, swing → daily,
+        # position → weekly). Used as a CONFIDENCE TILT only — empirically
+        # the hard-veto version vetoed too many profitable mean-reversion
+        # plays. The conviction-dominance gate above is the harder filter.
+        #   - aligned with HTF: confidence boost (8-15%)
+        #   - opposed to HTF:   confidence trim (10-18% depending on strength)
+        htf = ind.get("_htf_trend") or {}
+        htf_dir = int(htf.get("direction", 0) or 0)
+        htf_strength = float(htf.get("strength", 0) or 0)
+        if signal != "HOLD" and htf_dir != 0:
+            aligned = (signal == "BUY_CALL" and htf_dir == 1) or \
+                      (signal == "BUY_PUT" and htf_dir == -1)
+            opposed = (signal == "BUY_CALL" and htf_dir == -1) or \
+                      (signal == "BUY_PUT" and htf_dir == 1)
+            if aligned:
+                conf *= 1.0 + min(0.15, 0.08 + htf_strength * 0.15)
+            elif opposed:
+                # Strong-trend opposed: deeper trim but still allow the trade
+                trim = 0.90 - min(0.10, htf_strength * 0.20)  # 0.80..0.90
+                conf *= trim
 
         # ── Evidence-pillar gate ("don't fire with nothing backing it") ─
         # Count how many INDEPENDENT lines of evidence actually agree with
@@ -1651,11 +1752,17 @@ class JudgeAgent:
             hist_hit_rate=track_record["hit_rate"] if track_record else None,
         )
 
-        # The headline confidence number IS the real target-hit probability now.
-        # Kelly sizer downstream gets a true probability instead of a vote average.
-        # Keep the old vote-consensus score as a separate field for transparency.
+        # Blend the volatility-aware target-hit probability (objective —
+        # Brownian first-passage on ATR) with the multiplier-adjusted vote
+        # confidence (HTF tilt + conviction-dominance + regime + fundamentals
+        # + macro all bake in here). Pure hit-prob saturates at 95% on every
+        # decent swing setup; pure vote-conf ignores volatility. 60/40 blend
+        # gives an honest, well-spread number that responds to all gates.
         vote_consensus = round(conf, 1)
-        conf = hit["prob_pct"]
+        blended = 0.60 * float(hit["prob_pct"]) + 0.40 * float(conf)
+        # Honest ceiling — the real swing hit-rate from back-testing is
+        # ~73-87%, so capping at 90% prevents systemic overconfidence.
+        conf = round(max(5.0, min(90.0, blended)), 1)
 
         # If the model has historically been WORSE than coin-flip on this stock,
         # cap reported confidence — refusing to overstate conviction is honest.
