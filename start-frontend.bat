@@ -15,14 +15,18 @@ cd /d "%~dp0"
 echo [1/3] Killing anything on port 8081...
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr :8081') do taskkill /F /PID %%a 2>nul
 
-echo [2/3] Pulling latest code from GitHub (auto-stashing any local edits)...
-git pull --rebase --autostash
-if errorlevel 1 (
-    echo.
-    echo *** git pull failed — likely a merge conflict in your local edits. ***
-    echo *** Your changes are safe in `git stash list`. Resolve and re-run.  ***
-    pause
-    exit /b 1
+if /i "%1"=="nopull" (
+    echo [2/3] Skipping git pull ^(parent launcher already pulled^)...
+) else (
+    echo [2/3] Pulling latest code from GitHub (auto-stashing any local edits)...
+    git pull --rebase --autostash
+    if errorlevel 1 (
+        echo.
+        echo *** git pull failed — likely a merge conflict in your local edits. ***
+        echo *** Your changes are safe in `git stash list`. Resolve and re-run.  ***
+        pause
+        exit /b 1
+    )
 )
 
 echo [3/3] Starting frontend on http://localhost:8081 ...
