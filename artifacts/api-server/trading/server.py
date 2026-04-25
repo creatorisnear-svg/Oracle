@@ -1,8 +1,8 @@
 """
-TradeSignal AI — FastAPI backend v3
-Full indicator suite: SuperTrend, VWAP, Stochastic, OBV, Multi-TF Trend
-Signals: BUY_CALL | BUY_PUT | HOLD  (options-focused, short-term)
-Auto-streaming via WebSocket every 3 seconds
+TradeSignal AI — FastAPI backend v4
+9 Agents: PriceAction, Technical, Volume, Sentiment, OptionsFlow, Momentum,
+          Risk, FearGreed, Political  +  Judge (fires at 6/9 consensus)
+New: /api/fear-greed  /api/political-news  /api/accuracy  /api/accuracy/{symbol}
 """
 import asyncio
 import concurrent.futures
@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agents import (
     PriceActionAgent, TechnicalAgent, VolumeAgent,
     SentimentAgent, OptionsFlowAgent, MomentumAgent,
-    RiskAgent, JudgeAgent,
+    RiskAgent, FearGreedAgent, PoliticalAgent, JudgeAgent,
 )
 from indicators import compute_all_indicators, safe_float
 from learning import LearningSystem
@@ -32,29 +32,27 @@ logger = logging.getLogger(__name__)
 PORT = int(os.environ.get("PORT", 8080))
 
 
-def _sanitize(d: dict) -> dict:
-    """Convert numpy scalars / booleans to Python natives for JSON serialization."""
-    out = {}
-    for k, v in d.items():
-        if k.startswith("_"):
-            continue
-        if isinstance(v, np.ndarray):
-            continue
-        if isinstance(v, (np.floating,)):
-            out[k] = float(v)
-        elif isinstance(v, (np.integer,)):
-            out[k] = int(v)
-        elif isinstance(v, (np.bool_,)):
-            out[k] = bool(v)
-        elif callable(v):
-            continue
-        else:
-            out[k] = v
-    return out
+def _sanitize(obj):
+    """Recursively convert numpy scalars to Python natives for JSON serialization."""
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items() if not k.startswith("_") and not callable(v)}
+    if isinstance(obj, list):
+        return [_sanitize(i) for i in obj]
+    if isinstance(obj, np.ndarray):
+        return None
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    return obj
+
 
 AGENTS = [
     PriceActionAgent(), TechnicalAgent(), VolumeAgent(),
-    SentimentAgent(), OptionsFlowAgent(), MomentumAgent(), RiskAgent(),
+    SentimentAgent(), OptionsFlowAgent(), MomentumAgent(),
+    RiskAgent(), FearGreedAgent(), PoliticalAgent(),
 ]
 JUDGE = JudgeAgent()
 LEARNING = LearningSystem()
@@ -92,6 +90,7 @@ def _sync_fetch_live(symbol: str) -> dict:
                             or n.get("link", "#")),
                     "published_at": str(content.get("pubDate") or
                                        n.get("providerPublishTime", "")),
+                    "category": "financial",
                 })
         except Exception:
             pass
@@ -104,7 +103,7 @@ def _sync_fetch_live(symbol: str) -> dict:
             "market_state": str(getattr(info, "market_state", "REGULAR") or "REGULAR"),
             "news": news,
         }
-    except Exception as e:
+    except Exception:
         cached = _LIVE_CACHE.get(symbol, {})
         return {**cached, "ts": int(time.time()), "price": cached.get("price", 0),
                 "change_pct": cached.get("change_pct", 0), "news": cached.get("news", [])}
@@ -153,7 +152,7 @@ async def live_price_loop():
             if not _WS_CLIENTS.get(symbol):
                 continue
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     data = await loop.run_in_executor(pool, _sync_fetch_live, symbol)
                 _LIVE_CACHE[symbol] = data
@@ -176,7 +175,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="TradeSignal AI", lifespan=lifespan)
+app = FastAPI(title="TradeSignal AI v4", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -192,12 +191,11 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "3.0-callput"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "4.0-9agents"}
 
 
 @app.get("/api/live/{symbol}")
 def live_quote(symbol: str):
-    """Return cached live price (refreshed every 3s by background loop)."""
     sym = symbol.upper()
     if sym not in _LIVE_CACHE:
         _LIVE_CACHE[sym] = _sync_fetch_live(sym)
@@ -215,22 +213,67 @@ def get_news(symbol: str):
     return {"symbol": sym, "news": cached.get("news", []), "ts": cached.get("ts", 0)}
 
 
+@app.get("/api/fear-greed")
+def fear_greed():
+    """Composite Fear & Greed Index (0-100) from VIX + P/C ratio + SPY momentum + junk bonds."""
+    try:
+        agent = FearGreedAgent()
+        fg = agent._compute_fear_greed()
+        return {"status": "ok", **_sanitize(fg)}
+    except Exception as e:
+        logger.error(f"Fear/Greed error: {e}")
+        return {"error": str(e), "score": 50, "label": "Unknown"}
+
+
+@app.get("/api/political-news")
+def political_news():
+    """Live political/macro news from Google News RSS (Trump, tariff, Fed, economy)."""
+    try:
+        agent = PoliticalAgent()
+        news = agent._fetch_political_news()
+        return {"status": "ok", "count": len(news), "news": news}
+    except Exception as e:
+        logger.error(f"Political news error: {e}")
+        return {"error": str(e), "news": []}
+
+
+@app.get("/api/accuracy")
+def accuracy_report():
+    """Full accuracy report across all agents and signals with method descriptions."""
+    try:
+        report = LEARNING.get_accuracy_report()
+        agent_methods = {a.name: getattr(a, "method", "") for a in AGENTS}
+        agent_methods[JUDGE.name] = "6/9 consensus threshold — fires CALL/PUT only on strong agreement"
+        return {
+            "status": "ok",
+            "report": report,
+            "agent_methods": agent_methods,
+        }
+    except Exception as e:
+        logger.error(f"Accuracy report error: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/accuracy/{symbol}")
+def accuracy_by_symbol(symbol: str):
+    """Per-symbol prediction history and outcomes."""
+    sym = symbol.upper()
+    try:
+        history = LEARNING.get_history(sym)
+        return {"symbol": sym, "status": "ok", **history}
+    except Exception as e:
+        return {"error": str(e), "symbol": sym}
+
+
 @app.get("/api/chart/{symbol}")
 def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
-    """
-    Full OHLCV + all indicators for chart rendering.
-    Period options: 1d, 5d, 1mo, 3mo, 6mo
-    Interval options: 1m, 5m, 15m, 1h, 1d
-    """
     sym = symbol.upper()
-    # Smart interval defaults for options (short-term focus)
     if interval == "auto":
         auto_map = {"1d": "5m", "5d": "15m", "1mo": "1d", "3mo": "1d", "6mo": "1d"}
         interval = auto_map.get(period, "1d")
 
     try:
         df, _ = get_df(sym, period=period, interval=interval)
-        # Sort by time, remove duplicates, drop NaN OHLCV rows
         df = df.sort_index()
         df = df[~df.index.duplicated(keep="last")]
         df = df.dropna(subset=["Close"])
@@ -254,9 +297,7 @@ def chart_data(symbol: str, period: str = "3mo", interval: str = "1d"):
         vwap_vals = compute_vwap(highs, lows, closes, vols)
         st_vals, st_dir = compute_supertrend(highs, lows, closes)
 
-        # Convert timestamps — use .timestamp() to handle tz-aware DatetimeIndex
         raw_ts = [int(t.timestamp()) for t in df.index]
-        # Ensure strictly ascending (deduplicate any equal timestamps)
         timestamps = []
         last_ts = -1
         for ts in raw_ts:
@@ -313,7 +354,6 @@ def analyze(symbol: str, period: str = "3mo"):
         df, info = get_df(sym, period=period)
         votes, ind = run_agents_sync(sym, df, info)
         judgment = JUDGE.decide(votes, ind)
-
         LEARNING.save_prediction(
             symbol=sym, signal=judgment["signal"],
             confidence=judgment["confidence"],
@@ -322,9 +362,7 @@ def analyze(symbol: str, period: str = "3mo"):
             stop_loss=judgment["stop_loss"],
             agent_votes={v["agent"]: v["vote"] for v in votes},
         )
-
         safe_ind = _sanitize(ind)
-
         return {
             "symbol": sym,
             "agents": votes,
@@ -379,7 +417,7 @@ def learning_history(symbol: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WEBSOCKET — live analysis + live price streaming every 3s
+# WEBSOCKET — 9-agent live analysis + live price streaming every 3s
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.websocket("/api/ws/analyze/{symbol}")
@@ -392,8 +430,9 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
     _WS_CLIENTS[sym].add(websocket)
 
     try:
-        # 1. Send live price immediately
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+
+        # 1. Live price immediately
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             live = await loop.run_in_executor(pool, _sync_fetch_live, sym)
         _LIVE_CACHE[sym] = live
@@ -402,15 +441,16 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             "type": "status", "message": f"🔍 Fetching {sym} market data..."
         }))
 
-        # 2. Load candle data
+        # 2. Candle data
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             df, info = await loop.run_in_executor(pool, get_df, sym, "3mo", "1d")
 
         await websocket.send_text(json.dumps({
-            "type": "status", "message": f"📊 {sym} loaded — running 7 specialist agents..."
+            "type": "status",
+            "message": f"📊 {sym} loaded — running 9 specialist agents..."
         }))
 
-        # 3. Build indicator dict once
+        # 3. Build indicators once
         ind = compute_all_indicators(df)
         ind["_symbol"] = sym
         ind["_news"] = live.get("news", [])
@@ -418,24 +458,26 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
 
         votes = []
 
-        # 4. Stream each agent vote with a dramatic pause
+        # 4. Stream each agent vote
         for agent in AGENTS:
             await websocket.send_text(json.dumps({
-                "type": "status", "message": f"{agent.emoji} {agent.name} analyzing..."
+                "type": "status",
+                "message": f"{agent.emoji} {agent.name} analyzing..."
             }))
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 vote = await loop.run_in_executor(pool, agent.analyze, df, ind)
             w = weights.get(agent.name, 1.0)
             vote["confidence"] = round(min(vote.get("confidence", 50) * w, 97), 1)
             vote["weight"] = round(w, 3)
+            vote["method"] = getattr(agent, "method", "")
             votes.append(vote)
             await websocket.send_text(json.dumps({"type": "agent_vote", "vote": vote}))
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.15)
 
         # 5. Judge
         judgment = JUDGE.decide(votes, ind)
 
-        # 6. Persist prediction
+        # 6. Persist
         LEARNING.save_prediction(
             symbol=sym, signal=judgment["signal"],
             confidence=judgment["confidence"],
@@ -452,6 +494,13 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             except Exception:
                 pass
 
+        # 8. Accuracy snapshot
+        accuracy = {}
+        try:
+            accuracy = LEARNING.get_accuracy_report()
+        except Exception:
+            pass
+
         safe_ind = _sanitize(ind)
 
         await websocket.send_text(json.dumps({
@@ -459,9 +508,10 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             "judgment": judgment,
             "indicators": safe_ind,
             "forecast_line": judgment.get("forecast_line", []),
+            "accuracy": accuracy,
         }))
 
-        # 8. Keep alive — receive pings, background loop handles live_price pushes
+        # 9. Keep alive
         while True:
             try:
                 msg = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)

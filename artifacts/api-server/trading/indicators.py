@@ -1,11 +1,9 @@
 """
-Technical Indicators Library
-Drawn from original Hop market.ts indicator set.
-Includes: SMA, EMA, RSI, MACD, Bollinger, SuperTrend, VWAP, Stochastic, OBV, ATR, Multi-TF Trend
+Technical Indicators Library — Full Suite
+Hop original + ADX, Williams %R, Ichimoku, Fibonacci, Pivot Points, RSI Divergence
 """
 import numpy as np
 import pandas as pd
-from typing import Optional
 
 
 def safe_float(val, default=0.0):
@@ -16,56 +14,52 @@ def safe_float(val, default=0.0):
         return default
 
 
-def compute_atr(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> np.ndarray:
+# ─── Core Indicators ────────────────────────────────────────────────────────
+
+def compute_atr(highs, lows, closes, period=14):
     n = len(closes)
     tr = np.zeros(n)
     tr[0] = highs[0] - lows[0]
     for i in range(1, n):
         tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
     atr = np.zeros(n)
-    atr[period-1] = np.mean(tr[:period])
-    for i in range(period, n):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    if n >= period:
+        atr[period-1] = np.mean(tr[:period])
+        for i in range(period, n):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
     return atr
 
 
-def compute_supertrend(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 10, multiplier: float = 3.0):
-    """SuperTrend indicator — classic trend-following overlay from Hop."""
+def compute_supertrend(highs, lows, closes, period=10, multiplier=3.0):
     atr = compute_atr(highs, lows, closes, period)
     n = len(closes)
     hl2 = (highs + lows) / 2
     basic_upper = hl2 + multiplier * atr
     basic_lower = hl2 - multiplier * atr
-
     final_upper = np.copy(basic_upper)
     final_lower = np.copy(basic_lower)
-    direction = np.ones(n)  # 1 = bullish, -1 = bearish
+    direction = np.ones(n)
     supertrend = np.zeros(n)
-
     for i in range(1, n):
         if basic_upper[i] < final_upper[i-1] or closes[i-1] > final_upper[i-1]:
             final_upper[i] = basic_upper[i]
         else:
             final_upper[i] = final_upper[i-1]
-
         if basic_lower[i] > final_lower[i-1] or closes[i-1] < final_lower[i-1]:
             final_lower[i] = basic_lower[i]
         else:
             final_lower[i] = final_lower[i-1]
-
         if direction[i-1] == -1 and closes[i] > final_upper[i]:
             direction[i] = 1
         elif direction[i-1] == 1 and closes[i] < final_lower[i]:
             direction[i] = -1
         else:
             direction[i] = direction[i-1]
-
         supertrend[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
-
     return supertrend, direction
 
 
-def compute_vwap(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, volumes: np.ndarray) -> np.ndarray:
+def compute_vwap(highs, lows, closes, volumes):
     typical = (highs + lows + closes) / 3
     cum_tp_vol = np.cumsum(typical * volumes)
     cum_vol = np.cumsum(volumes)
@@ -74,7 +68,7 @@ def compute_vwap(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, volume
     return vwap
 
 
-def compute_stochastic(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> np.ndarray:
+def compute_stochastic(highs, lows, closes, period=14):
     stoch = np.full(len(closes), 50.0)
     for i in range(period-1, len(closes)):
         low_min = np.min(lows[i-period+1:i+1])
@@ -84,32 +78,32 @@ def compute_stochastic(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, 
     return stoch
 
 
-def compute_rsi(closes: np.ndarray, period: int = 14) -> np.ndarray:
+def compute_rsi(closes, period=14):
     delta = np.diff(closes, prepend=closes[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
     avg_gain = np.zeros(len(closes))
     avg_loss = np.zeros(len(closes))
-    avg_gain[period] = np.mean(gain[1:period+1])
-    avg_loss[period] = np.mean(loss[1:period+1])
-    for i in range(period+1, len(closes)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    if len(closes) > period:
+        avg_gain[period] = np.mean(gain[1:period+1])
+        avg_loss[period] = np.mean(loss[1:period+1])
+        for i in range(period+1, len(closes)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
     return 100 - (100 / (1 + rs))
 
 
-def compute_macd(closes: np.ndarray, fast=12, slow=26, signal=9):
+def compute_macd(closes, fast=12, slow=26, signal=9):
     s = pd.Series(closes)
     ema_fast = s.ewm(span=fast, adjust=False).mean().values
     ema_slow = s.ewm(span=slow, adjust=False).mean().values
     macd_line = ema_fast - ema_slow
     sig_line = pd.Series(macd_line).ewm(span=signal, adjust=False).mean().values
-    hist = macd_line - sig_line
-    return macd_line, sig_line, hist
+    return macd_line, sig_line, macd_line - sig_line
 
 
-def compute_bollinger(closes: np.ndarray, period: int = 20, std_mult: float = 2.0):
+def compute_bollinger(closes, period=20, std_mult=2.0):
     s = pd.Series(closes)
     mid = s.rolling(period).mean().values
     std = s.rolling(period).std().values
@@ -119,7 +113,7 @@ def compute_bollinger(closes: np.ndarray, period: int = 20, std_mult: float = 2.
     return upper, mid, lower, width_pct
 
 
-def compute_obv(closes: np.ndarray, volumes: np.ndarray) -> np.ndarray:
+def compute_obv(closes, volumes):
     obv = np.zeros(len(closes))
     for i in range(1, len(closes)):
         if closes[i] > closes[i-1]:
@@ -131,11 +125,7 @@ def compute_obv(closes: np.ndarray, volumes: np.ndarray) -> np.ndarray:
     return obv
 
 
-def multi_tf_trend_score(closes: np.ndarray) -> float:
-    """
-    Score from -3 to +3 based on price position relative to SMA20/50.
-    From original Hop market.ts trendScore logic.
-    """
+def multi_tf_trend_score(closes):
     if len(closes) < 50:
         return 0.0
     s = pd.Series(closes)
@@ -152,14 +142,188 @@ def multi_tf_trend_score(closes: np.ndarray) -> float:
     return score
 
 
+# ─── NEW: ADX (Average Directional Index) ─────────────────────────────────────
+def compute_adx(highs, lows, closes, period=14):
+    """
+    ADX measures trend STRENGTH (not direction). ADX > 25 = trending, < 20 = choppy.
+    Also returns +DI and -DI for direction.
+    """
+    n = len(closes)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    for i in range(1, n):
+        up = highs[i] - highs[i-1]
+        dn = lows[i-1] - lows[i]
+        plus_dm[i] = up if up > dn and up > 0 else 0
+        minus_dm[i] = dn if dn > up and dn > 0 else 0
+
+    atr = compute_atr(highs, lows, closes, period)
+    s_plus = pd.Series(plus_dm).ewm(span=period, adjust=False).mean().values
+    s_minus = pd.Series(minus_dm).ewm(span=period, adjust=False).mean().values
+    s_atr = pd.Series(atr).ewm(span=period, adjust=False).mean().values
+
+    plus_di = np.where(s_atr > 0, 100 * s_plus / s_atr, 0)
+    minus_di = np.where(s_atr > 0, 100 * s_minus / s_atr, 0)
+    dx = np.where(plus_di + minus_di > 0,
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(span=period, adjust=False).mean().values
+    return adx, plus_di, minus_di
+
+
+# ─── NEW: Williams %R ──────────────────────────────────────────────────────────
+def compute_williams_r(highs, lows, closes, period=14):
+    """Williams %R: -80 to -100 = oversold (CALL), 0 to -20 = overbought (PUT)."""
+    wr = np.full(len(closes), -50.0)
+    for i in range(period-1, len(closes)):
+        hh = np.max(highs[i-period+1:i+1])
+        ll = np.min(lows[i-period+1:i+1])
+        rng = hh - ll
+        wr[i] = ((hh - closes[i]) / rng * -100) if rng > 0 else -50.0
+    return wr
+
+
+# ─── NEW: Ichimoku Cloud ──────────────────────────────────────────────────────
+def compute_ichimoku(highs, lows, closes):
+    """
+    Tenkan 9, Kijun 26, Senkou B 52.
+    Price above cloud = bullish, below = bearish, inside = neutral.
+    """
+    def midpoint(h, l, period):
+        s = pd.Series(h)
+        ls = pd.Series(l)
+        return ((s.rolling(period).max() + ls.rolling(period).min()) / 2).values
+
+    tenkan = midpoint(highs, lows, 9)
+    kijun = midpoint(highs, lows, 26)
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = midpoint(highs, lows, 52)
+
+    close = closes[-1]
+    sa = safe_float(senkou_a[-1], close)
+    sb = safe_float(senkou_b[-1], close)
+    cloud_top = max(sa, sb)
+    cloud_bot = min(sa, sb)
+    t = safe_float(tenkan[-1], close)
+    k = safe_float(kijun[-1], close)
+
+    if close > cloud_top:
+        signal = "bullish"
+    elif close < cloud_bot:
+        signal = "bearish"
+    else:
+        signal = "neutral"
+
+    # TK cross
+    tk_cross = None
+    if len(tenkan) > 2 and len(kijun) > 2:
+        if tenkan[-1] > kijun[-1] and tenkan[-2] <= kijun[-2]:
+            tk_cross = "bullish"
+        elif tenkan[-1] < kijun[-1] and tenkan[-2] >= kijun[-2]:
+            tk_cross = "bearish"
+
+    return {
+        "signal": signal,
+        "cloud_top": round(cloud_top, 2),
+        "cloud_bottom": round(cloud_bot, 2),
+        "tenkan": round(t, 2),
+        "kijun": round(k, 2),
+        "tk_cross": tk_cross,
+    }
+
+
+# ─── NEW: Fibonacci Retracement ───────────────────────────────────────────────
+def compute_fibonacci(highs, lows, period=50):
+    """Key Fibonacci levels from recent swing high/low."""
+    n = min(period, len(highs))
+    h = np.max(highs[-n:])
+    l = np.min(lows[-n:])
+    diff = h - l
+    if diff == 0:
+        return {}
+    return {
+        "high": round(h, 2),
+        "low": round(l, 2),
+        "fib_0": round(l, 2),
+        "fib_236": round(l + 0.236 * diff, 2),
+        "fib_382": round(l + 0.382 * diff, 2),
+        "fib_500": round(l + 0.500 * diff, 2),
+        "fib_618": round(l + 0.618 * diff, 2),  # Golden ratio — highest probability
+        "fib_786": round(l + 0.786 * diff, 2),
+        "fib_100": round(h, 2),
+    }
+
+
+# ─── NEW: Pivot Points & Support/Resistance ───────────────────────────────────
+def compute_pivot_levels(highs, lows, closes, period=5):
+    """Classic pivot points from recent data."""
+    n = min(period, len(highs))
+    h = np.max(highs[-n:])
+    l = np.min(lows[-n:])
+    c = closes[-1]
+    pivot = (h + l + c) / 3
+    r1 = 2 * pivot - l
+    r2 = pivot + (h - l)
+    r3 = h + 2 * (pivot - l)
+    s1 = 2 * pivot - h
+    s2 = pivot - (h - l)
+    s3 = l - 2 * (h - pivot)
+    return {
+        "pivot": round(pivot, 2),
+        "r1": round(r1, 2), "r2": round(r2, 2), "r3": round(r3, 2),
+        "s1": round(s1, 2), "s2": round(s2, 2), "s3": round(s3, 2),
+    }
+
+
+# ─── NEW: RSI Divergence Detection ────────────────────────────────────────────
+def detect_rsi_divergence(closes, rsi_vals, lookback=20):
+    """
+    Bullish divergence: price lower low + RSI higher low → likely bounce up (CALL).
+    Bearish divergence: price higher high + RSI lower high → likely reversal down (PUT).
+    Returns: "bullish", "bearish", or "none"
+    """
+    n = len(closes)
+    if n < lookback + 5:
+        return "none"
+
+    half = lookback // 2
+    p_early = closes[n-lookback:n-half]
+    p_late = closes[n-half:n]
+    r_early = rsi_vals[n-lookback:n-half]
+    r_late = rsi_vals[n-half:n]
+
+    if len(p_early) == 0 or len(p_late) == 0:
+        return "none"
+
+    # Bullish: price lower low, RSI higher low
+    p_early_min = np.min(p_early)
+    p_late_min = np.min(p_late)
+    r_early_at_low = r_early[np.argmin(p_early)]
+    r_late_at_low = r_late[np.argmin(p_late)]
+
+    if p_late_min < p_early_min and r_late_at_low > r_early_at_low + 4:
+        return "bullish"
+
+    # Bearish: price higher high, RSI lower high
+    p_early_max = np.max(p_early)
+    p_late_max = np.max(p_late)
+    r_early_at_high = r_early[np.argmax(p_early)]
+    r_late_at_high = r_late[np.argmax(p_late)]
+
+    if p_late_max > p_early_max and r_late_at_high < r_early_at_high - 4:
+        return "bearish"
+
+    return "none"
+
+
+# ─── Composite Indicator Bundle ────────────────────────────────────────────────
 def compute_all_indicators(df: pd.DataFrame) -> dict:
-    """Compute the full indicator set used across all agents."""
     closes = df["Close"].values.astype(float)
     highs = df["High"].values.astype(float)
     lows = df["Low"].values.astype(float)
-    volumes = df["Volume"].values.astype(float)
+    volumes = df["Volume"].fillna(0).values.astype(float)
     n = len(closes)
 
+    # Core indicators
     atr = compute_atr(highs, lows, closes)
     supertrend_vals, st_dir = compute_supertrend(highs, lows, closes)
     vwap = compute_vwap(highs, lows, closes, volumes)
@@ -170,55 +334,68 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
     obv = compute_obv(closes, volumes)
     trend_score = multi_tf_trend_score(closes)
 
+    # New indicators
+    adx_vals, plus_di, minus_di = compute_adx(highs, lows, closes)
+    wr = compute_williams_r(highs, lows, closes)
+    ichimoku = compute_ichimoku(highs, lows, closes)
+    fibonacci = compute_fibonacci(highs, lows)
+    pivots = compute_pivot_levels(highs, lows, closes)
+    rsi_div = detect_rsi_divergence(closes, rsi)
+
     # Volume stats
-    avg_vol_20 = np.mean(volumes[-20:]) if n >= 20 else np.mean(volumes)
+    avg_vol_20 = np.mean(volumes[-20:]) if n >= 20 else np.mean(volumes) if n > 0 else 1
     rel_vol = volumes[-1] / avg_vol_20 if avg_vol_20 > 0 else 1.0
     vol_trend_5v20 = (np.mean(volumes[-5:]) / avg_vol_20) if n >= 20 else 1.0
-
-    # Up/down day volume ratio (last 20d)
     up_vol = sum(volumes[i] for i in range(max(n-20, 1), n) if closes[i] > closes[i-1])
     dn_vol = sum(volumes[i] for i in range(max(n-20, 1), n) if closes[i] < closes[i-1])
     up_dn_ratio = up_vol / dn_vol if dn_vol > 0 else 1.0
-
-    # OBV slope (10d %)
-    if n >= 10:
-        obv_start = obv[-10]
-        obv_slope = (obv[-1] - obv_start) / (abs(obv_start) + 1e-9) * 100
-    else:
-        obv_slope = 0.0
+    obv_slope = (obv[-1] - obv[-10]) / (abs(obv[-10]) + 1e-9) * 100 if n >= 10 else 0.0
 
     price = closes[-1]
     prev_close = closes[-2] if n >= 2 else closes[-1]
     change_1d = (price - prev_close) / prev_close * 100 if prev_close else 0
     change_5d = (price - closes[-5]) / closes[-5] * 100 if n >= 5 else 0
 
-    # SuperTrend stats
-    st_now = st_dir[-1]
     st_flips = 0
     for i in range(n-2, max(n-20, 0), -1):
         if st_dir[i] != st_dir[i+1]:
             st_flips = n - 1 - i
             break
 
-    # Price vs VWAP
     price_vs_vwap = (price - vwap[-1]) / vwap[-1] * 100 if vwap[-1] > 0 else 0
 
-    # Volume confirms move
-    if volumes[-1] > avg_vol_20 * 1.2 and change_1d > 0:
-        vol_confirm = "confirms"
-    elif volumes[-1] > avg_vol_20 * 1.2 and change_1d < 0:
+    vol_confirm = "neutral"
+    if volumes[-1] > avg_vol_20 * 1.2:
         vol_confirm = "confirms"
     elif volumes[-1] < avg_vol_20 * 0.8:
         vol_confirm = "diverges"
-    else:
-        vol_confirm = "neutral"
+
+    # Nearest Fibonacci level to current price
+    near_fib = None
+    if fibonacci:
+        fib_levels = [v for k, v in fibonacci.items() if k.startswith("fib_") and isinstance(v, (int, float))]
+        if fib_levels:
+            dists = [(abs(price - lvl), lvl) for lvl in fib_levels]
+            dists.sort()
+            near_fib = dists[0][1]
+
+    # Price vs pivot levels
+    pivot_bias = "neutral"
+    if pivots:
+        if price > pivots.get("r1", price):
+            pivot_bias = "bullish_breakout"
+        elif price > pivots.get("pivot", price):
+            pivot_bias = "bullish"
+        elif price < pivots.get("s1", price):
+            pivot_bias = "bearish_breakdown"
+        elif price < pivots.get("pivot", price):
+            pivot_bias = "bearish"
 
     return {
         "price": price,
         "prev_close": prev_close,
         "change_1d": change_1d,
         "change_5d": change_5d,
-        # Moving averages
         "sma20": safe_float(pd.Series(closes).rolling(20).mean().iloc[-1]),
         "sma50": safe_float(pd.Series(closes).rolling(50).mean().iloc[-1]),
         "ema9": safe_float(pd.Series(closes).ewm(span=9).mean().iloc[-1]),
@@ -231,8 +408,8 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "macd_signal": safe_float(macd_sig[-1]),
         "macd_hist": safe_float(macd_hist[-1]),
         "macd_hist_prev": safe_float(macd_hist[-2]) if n >= 2 else 0,
-        "macd_cross_up": macd_line[-1] > macd_sig[-1] and macd_line[-2] <= macd_sig[-2] if n >= 2 else False,
-        "macd_cross_dn": macd_line[-1] < macd_sig[-1] and macd_line[-2] >= macd_sig[-2] if n >= 2 else False,
+        "macd_cross_up": bool(macd_line[-1] > macd_sig[-1] and macd_line[-2] <= macd_sig[-2]) if n >= 2 else False,
+        "macd_cross_dn": bool(macd_line[-1] < macd_sig[-1] and macd_line[-2] >= macd_sig[-2]) if n >= 2 else False,
         # Bollinger
         "bb_upper": safe_float(bb_upper[-1]),
         "bb_mid": safe_float(bb_mid[-1]),
@@ -245,7 +422,7 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "atr_pct": safe_float(atr[-1] / price * 100) if price else 0,
         # SuperTrend
         "supertrend": safe_float(supertrend_vals[-1]),
-        "supertrend_dir": "up" if st_now > 0 else "down",
+        "supertrend_dir": "up" if st_dir[-1] > 0 else "down",
         "supertrend_dist_pct": safe_float((price - supertrend_vals[-1]) / price * 100) if price else 0,
         "supertrend_flip_bars_ago": st_flips,
         # VWAP
@@ -265,21 +442,35 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "low_52w": safe_float(np.min(lows)),
         # Volatility
         "volatility_20d": safe_float(np.std(np.diff(closes[-21:]) / closes[-21:-1]) * np.sqrt(252) * 100) if n >= 21 else 20.0,
+        # ── NEW ──────────────────────────────────────────────────────
+        "adx": safe_float(adx_vals[-1]),
+        "adx_trending": bool(adx_vals[-1] > 25),
+        "plus_di": safe_float(plus_di[-1]),
+        "minus_di": safe_float(minus_di[-1]),
+        "williams_r": safe_float(wr[-1]),
+        "ichimoku": ichimoku,
+        "ichimoku_signal": ichimoku["signal"],
+        "ichimoku_tk_cross": ichimoku.get("tk_cross"),
+        "fibonacci": fibonacci,
+        "near_fib_level": safe_float(near_fib) if near_fib else 0,
+        "pivot_levels": pivots,
+        "pivot_bias": pivot_bias,
+        "rsi_divergence": rsi_div,
+        "stoch_k": safe_float(stoch[-1]),
     }
 
 
 def score_indicators_to_direction(ind: dict) -> dict:
     """
-    Convert indicator dict → directional score.
+    Full composite score → directional call.
     Adapted from Hop marketBacktest.ts scoreIndicators().
-    Returns score (-6..+6), confidence, direction.
     """
     score = 0.0
 
-    # 1. Multi-TF trend (-3..+3)
+    # 1. Multi-TF trend
     score += ind.get("trend_score", 0)
 
-    # 2. RSI (tiered, from Hop)
+    # 2. RSI (tiered)
     rsi = ind.get("rsi14", 50)
     if rsi >= 70:   score += 2.5
     elif rsi >= 60: score += 1.5
@@ -309,7 +500,7 @@ def score_indicators_to_direction(ind: dict) -> dict:
     if ind.get("supertrend_dir") == "up": score += 1.5
     else: score -= 1.5
 
-    # 6. VWAP bias
+    # 6. VWAP
     pvwap = ind.get("price_vs_vwap_pct", 0)
     if pvwap > 0.5: score += 0.5
     elif pvwap < -0.5: score -= 0.5
@@ -321,7 +512,7 @@ def score_indicators_to_direction(ind: dict) -> dict:
     elif stoch <= 20: score -= 1.0
     elif stoch <= 30: score -= 0.5
 
-    # 8. Volume confirmation
+    # 8. Volume
     rel_v = ind.get("rel_volume", 1.0)
     ch = ind.get("change_1d", 0)
     if rel_v > 1.5:
@@ -335,9 +526,46 @@ def score_indicators_to_direction(ind: dict) -> dict:
     if obv_s > 5: score += 0.5
     elif obv_s < -5: score -= 0.5
 
-    # Clamp & convert to direction + confidence
-    score = max(-9, min(9, score))
-    THRESHOLD = 3.0
+    # ── NEW INDICATORS ──────────────────────────────────────────────
+    # 10. ADX — only boost score when market is clearly trending
+    adx = ind.get("adx", 20)
+    if adx > 35: score *= 1.1  # Strong trend, amplify
+    elif adx < 15: score *= 0.7  # Choppy, dampen
+
+    # 11. Williams %R
+    wr = ind.get("williams_r", -50)
+    if wr >= -20: score += 1.0    # Overbought → bearish
+    elif wr <= -80: score -= 1.0  # Oversold → bullish (mean-reversion)
+    if wr <= -80: score += 1.5    # Deep oversold = CALL signal
+    if wr >= -20: score -= 1.5    # Deep overbought = PUT signal
+
+    # 12. Ichimoku
+    ichi = ind.get("ichimoku_signal", "neutral")
+    if ichi == "bullish": score += 1.5
+    elif ichi == "bearish": score -= 1.5
+    if ind.get("ichimoku_tk_cross") == "bullish": score += 1.0
+    elif ind.get("ichimoku_tk_cross") == "bearish": score -= 1.0
+
+    # 13. RSI Divergence (powerful early signal)
+    div = ind.get("rsi_divergence", "none")
+    if div == "bullish": score += 2.0
+    elif div == "bearish": score -= 2.0
+
+    # 14. Pivot bias
+    pb = ind.get("pivot_bias", "neutral")
+    if pb == "bullish_breakout": score += 1.0
+    elif pb == "bullish": score += 0.4
+    elif pb == "bearish_breakdown": score -= 1.0
+    elif pb == "bearish": score -= 0.4
+
+    # 15. +DI vs -DI
+    plus_di = ind.get("plus_di", 25)
+    minus_di = ind.get("minus_di", 25)
+    if plus_di > minus_di + 5: score += 0.5
+    elif minus_di > plus_di + 5: score -= 0.5
+
+    score = max(-12, min(12, score))
+    THRESHOLD = 3.5
     if score >= THRESHOLD:
         direction = "BULLISH"
     elif score <= -THRESHOLD:
@@ -345,50 +573,54 @@ def score_indicators_to_direction(ind: dict) -> dict:
     else:
         direction = "NEUTRAL"
 
-    # Confidence: scale score magnitude to 50-95%
-    conf = min(95, 50 + abs(score) / 9 * 45)
-
+    conf = min(95, 45 + abs(score) / 12 * 50)
     return {"direction": direction, "score": score, "confidence": round(conf, 1)}
 
 
 def suggest_options(direction: str, price: float, atr: float, ind: dict) -> dict:
-    """Generate strike hint, expiry hint, entry trigger, risk note — from Hop's PredictionResult."""
+    fib = ind.get("fibonacci", {})
+    pivots = ind.get("pivot_levels", {})
+
     if direction == "BULLISH":
         action = "BUY_CALL"
-        # ATM or slightly OTM call
-        strike = round(price * 1.005 / 5) * 5  # nearest $5 above
-        if strike <= price:
-            strike += 5
+        # Use R1 as strike hint if available
+        strike_raw = pivots.get("r1", price * 1.005)
+        strike = round(strike_raw / 5) * 5
+        if strike <= price: strike += 5
         target = round(price + 3 * atr, 2)
         stop = round(price - 2 * atr, 2)
+        # Near Fibonacci 61.8% = high confidence
+        fib618 = fib.get("fib_618", 0)
+        conf_boost = "61.8% Fibonacci support near entry. " if fib618 and abs(price - fib618) / price < 0.02 else ""
         expiry = "7-14 DTE (weeklies or next monthly)"
-        entry_trigger = f"Price clears ${round(price * 1.005, 2):.2f} on volume ≥ 1.3× avg"
-        risk_note = f"Close call if price breaks ${stop:.2f}. Max loss = premium paid."
+        entry_trigger = f"{conf_boost}Price clears ${round(price * 1.005, 2):.2f} on volume ≥ 1.3× avg"
+        risk_note = f"Close call if price breaks ${stop:.2f} (2×ATR). Max loss = premium paid."
     elif direction == "BEARISH":
         action = "BUY_PUT"
-        # ATM or slightly OTM put
-        strike = round(price * 0.995 / 5) * 5
-        if strike >= price:
-            strike -= 5
+        strike_raw = pivots.get("s1", price * 0.995)
+        strike = round(strike_raw / 5) * 5
+        if strike >= price: strike -= 5
         target = round(price - 3 * atr, 2)
         stop = round(price + 2 * atr, 2)
+        fib382 = fib.get("fib_382", 0)
+        conf_boost = "38.2% Fibonacci resistance near entry. " if fib382 and abs(price - fib382) / price < 0.02 else ""
         expiry = "7-14 DTE (weeklies or next monthly)"
-        entry_trigger = f"Price breaks ${round(price * 0.995, 2):.2f} on volume ≥ 1.3× avg"
-        risk_note = f"Close put if price recovers above ${stop:.2f}. Max loss = premium paid."
+        entry_trigger = f"{conf_boost}Price breaks ${round(price * 0.995, 2):.2f} on volume ≥ 1.3× avg"
+        risk_note = f"Close put if price recovers above ${stop:.2f} (2×ATR). Max loss = premium paid."
     else:
         action = "HOLD"
         strike = round(price / 5) * 5
         target = price
         stop = round(price - 2 * atr, 2)
         expiry = "Wait for clearer setup"
-        entry_trigger = "No clear entry — wait for 6/8 agent consensus"
-        risk_note = "No position recommended. Market in consolidation."
+        entry_trigger = "No clear entry — wait for 6/9 agent consensus"
+        risk_note = "No position recommended. Mixed signals or choppy market."
 
     vola = ind.get("volatility_20d", 20)
-    if vola > 40:
-        risk_note += f" High volatility ({vola:.0f}%): size down to 25-50% normal."
-    elif vola > 60:
-        risk_note += " EXTREME volatility — avoid or use spreads instead."
+    if vola > 50:
+        risk_note += f" EXTREME vol ({vola:.0f}%): use spreads."
+    elif vola > 35:
+        risk_note += f" High vol ({vola:.0f}%): size down 50%."
 
     return {
         "action": action,
