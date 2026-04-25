@@ -943,7 +943,7 @@ export default function TradingDashboard() {
 
   const WATCHLIST = ["AAPL", "NVDA", "TSLA", "MSFT", "SPY", "QQQ", "AMZN", "META", "AMD", "COIN"];
   const TAB_CLASSES = (t: string) =>
-    `relative px-3 py-2 text-[11px] font-semibold tracking-wide cursor-pointer whitespace-nowrap transition-colors shrink-0 ${tab === t ? "text-white" : "text-slate-500 hover:text-slate-200"}`;
+    `relative flex-1 px-1 py-2.5 text-[10px] font-bold tracking-wider cursor-pointer whitespace-nowrap text-center transition-colors ${tab === t ? "text-white" : "text-slate-500 hover:text-slate-200"}`;
 
   const stj = judgment ? signalStyle(judgment.signal) : signalStyle("HOLD");
   const callPct = votes.length ? Math.round(votes.filter(v => v.vote === "BUY_CALL").length / votes.length * 100) : 0;
@@ -1164,17 +1164,22 @@ export default function TradingDashboard() {
             </div>
           )}
 
-          {/* Tabs — fixed 4×2 grid so labels never wrap unevenly */}
-          <div className="grid grid-cols-4 gap-1 p-2 border-b border-slate-800 shrink-0">
+          {/* Tabs — single horizontal row with an underline indicator */}
+          <div className="flex items-stretch border-b border-slate-800 shrink-0">
             {([
-              ["signal","SIGNAL"],["agents","AGENTS"],["options","OPTIONS"],["chain","CHAIN"],
-              ["news","NEWS"],["fear","F&G"],["accuracy","ACCURACY"],["paper","PAPER"]
+              ["signal","SIGNAL"],["agents","AGENTS"],["options","OPTS"],["chain","CHAIN"],
+              ["news","NEWS"],["fear","F&G"],["accuracy","STATS"],["paper","PAPER"]
             ] as const).map(([t, label]) => (
               <button key={t} onClick={() => {
                 setTab(t);
                 if (t === "chain" && symbol) fetchChain(symbol);
                 if (t === "paper") loadPaperData();
-              }} className={TAB_CLASSES(t)}>{label}</button>
+              }} className={TAB_CLASSES(t)}>
+                {label}
+                {tab === t && (
+                  <span className="absolute left-2 right-2 -bottom-px h-0.5 bg-blue-500 rounded-full" />
+                )}
+              </button>
             ))}
           </div>
 
