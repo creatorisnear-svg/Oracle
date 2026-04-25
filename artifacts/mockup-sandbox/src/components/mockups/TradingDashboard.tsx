@@ -191,6 +191,9 @@ export default function TradingDashboard() {
       const data = await resp.json();
       if (data.error || !data.candles?.length) return;
 
+      // If chart was replaced while we were fetching, abort — don't touch the disposed chart
+      if (chartRef.current !== chart) return;
+
       const candle = chart.addSeries(CandlestickSeries, {
         upColor: "#26a69a", downColor: "#ef5350",
         borderUpColor: "#26a69a", borderDownColor: "#ef5350",

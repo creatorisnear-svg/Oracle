@@ -1,0 +1,24 @@
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:93: RuntimeWarning: invalid value encountered in divide
+  rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+INFO:     127.0.0.1:58014 - "GET /api/chart/AAPL?period=3mo&interval=1d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62859 - "WebSocket /api/ws/analyze/AAPL" [accepted]
+INFO:     connection open
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:93: RuntimeWarning: invalid value encountered in divide
+  rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+INFO:     127.0.0.1:56948 - "GET /api/chart/AAPL?period=1d&interval=5m HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58013 - "GET /api/fear-greed HTTP/1.1" 200 OK
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:93: RuntimeWarning: invalid value encountered in divide
+  rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:165: RuntimeWarning: divide by zero encountered in divide
+  plus_di = np.where(s_atr > 0, 100 * s_plus / s_atr, 0)
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:165: RuntimeWarning: invalid value encountered in divide
+  plus_di = np.where(s_atr > 0, 100 * s_plus / s_atr, 0)
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:166: RuntimeWarning: divide by zero encountered in divide
+  minus_di = np.where(s_atr > 0, 100 * s_minus / s_atr, 0)
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:166: RuntimeWarning: invalid value encountered in divide
+  minus_di = np.where(s_atr > 0, 100 * s_minus / s_atr, 0)
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:168: RuntimeWarning: invalid value encountered in divide
+  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+C:\Users\gialg\Oracle\artifacts\api-server\trading\indicators.py:93: RuntimeWarning: invalid value encountered in divide
+  rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+INFO:     127.0.0.1:55549 - "GET /api/chart/AAPL?period=1d&interval=5m HTTP/1.1" 200 OK
