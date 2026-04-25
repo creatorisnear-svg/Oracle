@@ -1116,19 +1116,18 @@ class JudgeAgent:
             obv_slope = float(ind.get("obv_slope_10d_pct") or 0)
             vol_trend = float(ind.get("vol_trend_5v20") or 1.0)
             pvwap = float(ind.get("price_vs_vwap_pct") or 0)
-            last_close = float(df["Close"].iloc[-1]) if len(df) else price
-            prev_close = float(df["Close"].iloc[-2]) if len(df) >= 2 else last_close
+            change_1d = float(ind.get("change_1d") or 0)
 
             if signal == "BUY_CALL":
                 trend_ok = (st_dir == "up") and (ema9 > ema21)
                 momo_ok = (macd_hist > 0) and (roc10 > 0) and (plus_di >= minus_di)
                 vol_ok = (obv_slope > 0) and (vol_trend >= 0.9)
-                price_ok = (pvwap > 0) and (last_close >= prev_close)
+                price_ok = (pvwap > 0) and (change_1d >= 0)
             else:  # BUY_PUT
                 trend_ok = (st_dir == "down") and (ema9 < ema21)
                 momo_ok = (macd_hist < 0) and (roc10 < 0) and (minus_di >= plus_di)
                 vol_ok = (obv_slope < 0) and (vol_trend >= 0.9)
-                price_ok = (pvwap < 0) and (last_close <= prev_close)
+                price_ok = (pvwap < 0) and (change_1d <= 0)
 
             pillars_aligned = sum([trend_ok, momo_ok, vol_ok, price_ok])
             pillar_names = ["trend", "momentum", "volume", "price"]
