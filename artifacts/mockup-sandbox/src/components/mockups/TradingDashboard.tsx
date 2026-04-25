@@ -377,6 +377,14 @@ export default function TradingDashboard() {
   const volSeriesRef = useRef<any>(null);
   const lastVolBarRef = useRef<{ time: number; value: number } | null>(null);
   const prevDayVolRef = useRef<number>(0);
+  // Volume-spike alert: 20-bar rolling average + a per-bar "alerted" flag
+  // so the banner only flashes once per breakout, not on every tick.
+  const avgVol20Ref = useRef<number>(0);
+  const spikeAlertedTimeRef = useRef<number>(0);
+  const spikeMarkersRef = useRef<any>(null);
+  const spikeMarkerListRef = useRef<any[]>([]);
+  const [spikeAlert, setSpikeAlert] = useState<{ ratio: number; ts: number } | null>(null);
+  const spikeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Chart setup ─────────────────────────────────────────────────────────
   const loadChart = useCallback(async (sym: string, p: string) => {
@@ -594,10 +602,25 @@ export default function TradingDashboard() {
         const lv = data.volume[data.volume.length - 1];
         lastVolBarRef.current = { time: Number(lv.time), value: Number(lv.value) || 0 };
         prevDayVolRef.current = 0;  // reset; first live tick seeds the baseline
+        // 20-bar rolling average for spike detection. Excludes the current
+        // (incomplete) bar so a partial bar can't drag the baseline down.
+        const tail = data.volume.slice(-21, -1) as any[];
+        if (tail.length >= 5) {
+          const sum = tail.reduce((s, d) => s + (Number(d.value) || 0), 0);
+          avgVol20Ref.current = sum / tail.length;
+        } else {
+          avgVol20Ref.current = 0;
+        }
+        spikeMarkerListRef.current = [];
+        spikeMarkersRef.current = null;
+        spikeAlertedTimeRef.current = 0;
       } else {
         volSeriesRef.current = null;
         lastVolBarRef.current = null;
         prevDayVolRef.current = 0;
+        avgVol20Ref.current = 0;
+        spikeMarkerListRef.current = [];
+        spikeMarkersRef.current = null;
       }
 
       chart.timeScale().fitContent();
@@ -1037,6 +1060,43 @@ export default function TradingDashboard() {
             prevDayVolRef.current = dayVol;
             try { vS.update({ time: newTime as any, value: newVal, color }); } catch {}
             lastVolBarRef.current = { time: newTime, value: newVal };
+
+            // ── Volume-spike alert ──────────────────────────────────────
+            // Fire when the current bar's running volume crosses 2× the
+            // 20-bar average AND the alert hasn't already fired for this
+            // bar. The marker stays on the chart; the banner fades in 6s.
+            const avg = avgVol20Ref.current;
+            if (avg > 0 && newVal >= avg * 2 && spikeAlertedTimeRef.current !== newTime) {
+              spikeAlertedTimeRef.current = newTime;
+              const ratio = newVal / avg;
+
+              // Banner overlay (auto-fade)
+              setSpikeAlert({ ratio, ts: newTime });
+              if (spikeTimerRef.current) clearTimeout(spikeTimerRef.current);
+              spikeTimerRef.current = setTimeout(() => setSpikeAlert(null), 6000);
+
+              // Persistent marker on the candle
+              try {
+                const cR2 = candleRef.current;
+                if (cR2) {
+                  spikeMarkerListRef.current.push({
+                    time: newTime as UTCTimestamp,
+                    position: "aboveBar",
+                    color: "#fbbf24",
+                    shape: "circle",
+                    text: `VOL ${ratio.toFixed(1)}×`,
+                    size: 1,
+                  });
+                  spikeMarkerListRef.current.sort(
+                    (a, b) => (a.time as number) - (b.time as number)
+                  );
+                  spikeMarkersRef.current = createSeriesMarkers(
+                    cR2,
+                    spikeMarkerListRef.current
+                  );
+                }
+              } catch {}
+            }
           }
         }
       }
@@ -1236,7 +1296,19 @@ export default function TradingDashboard() {
           </div>
 
           {/* Chart */}
-          <div ref={chartContainerRef} className="flex-1 min-h-0" />
+          <div className="flex-1 min-h-0 relative">
+            <div ref={chartContainerRef} className="w-full h-full" />
+            {spikeAlert && (
+              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 pointer-events-none">
+                <div className="px-3 py-1.5 rounded-lg bg-amber-500/95 text-slate-900 text-xs font-bold shadow-lg shadow-amber-500/40 animate-pulse flex items-center gap-2">
+                  <span>⚡ VOLUME SPIKE</span>
+                  <span className="font-mono bg-slate-900/30 px-1.5 py-0.5 rounded">
+                    {spikeAlert.ratio.toFixed(1)}× avg
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Status bar */}
           {(status || analyzing) && (
