@@ -104,7 +104,7 @@ function FearGreedGauge({ data }: { data: FearGreed | null }) {
           <line x1="70" y1="85" x2="70" y2="35" stroke={color} strokeWidth="3" strokeLinecap="round" />
           <circle cx="70" cy="85" r="5" fill={color} />
         </g>
-        <text x="70" y="75" textAnchor="middle" fill={color} fontSize="16" fontWeight="bold">{score}</text>
+        <text x="70" y="75" textAnchor="middle" fill={color} fontSize="16" fontWeight="bold">{Math.round(score)}</text>
       </svg>
       <div className="text-sm font-bold" style={{ color }}>{data.label}</div>
       <div className="flex gap-2 text-xs text-slate-500 flex-wrap justify-center">
@@ -184,7 +184,9 @@ export default function TradingDashboard() {
     });
     chartRef.current = chart;
 
-    const url = `${API_BASE}/chart/${sym}?period=${p}&interval=${p === "1d" ? "5m" : p === "5d" ? "15m" : "1d"}`;
+    const fetchPeriod = p === "1d" ? "5d" : p;
+    const fetchInterval = p === "1d" ? "5m" : p === "5d" ? "15m" : "1d";
+    const url = `${API_BASE}/chart/${sym}?period=${fetchPeriod}&interval=${fetchInterval}`;
     try {
       const resp = await fetch(url);
       if (!resp.ok) return;
@@ -345,6 +347,7 @@ export default function TradingDashboard() {
         setAnalyzing(false);
         setStatus("");
         setTab("signal");
+        loadFearGreed();
       } else if (msg.type === "error") {
         setStatus(`❌ ${msg.message}`);
         setAnalyzing(false);
