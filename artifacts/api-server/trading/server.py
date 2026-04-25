@@ -610,13 +610,18 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
     ind["earnings"] = _earnings_proximity(sym)
     weights = LEARNING.get_weights()
 
-    # Meta-learning multipliers (per regime + per symbol).
+    # Meta-learning multipliers (per regime + per symbol + per horizon).
     regime_label = (ind.get("market_regime") or {}).get("label", "unknown")
     try:
         regime_mults = meta_learning.get_regime_multipliers()
         symbol_mults = meta_learning.get_symbol_multipliers()
     except Exception:
         regime_mults, symbol_mults = {}, {}
+    try:
+        # Per-horizon agent calibration (defaults to 1.0 until ≥10 samples)
+        horizon_mults = LEARNING.get_horizon_multipliers()
+    except Exception:
+        horizon_mults = {}
 
     # Evaluate AI-discovered strategies on the current indicator state.
     try:
@@ -633,16 +638,20 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
             vote = {"agent": agent.name, "emoji": "❓", "vote": "HOLD",
                     "confidence": 50.0, "reason": str(e)}
         w = weights.get(agent.name, 1.0)
-        # Stack regime + symbol learning on top of base weight (each ±~30%)
+        # Stack regime + symbol + horizon learning on top of base weight
+        # (each bounded ±~30% so combined effect is bounded ±~120%, but the
+        # final confidence is still clamped at 97 below).
         rw = regime_mults.get((agent.name, regime_label), 1.0)
         sw = symbol_mults.get((agent.name, sym), 1.0)
-        eff_w = w * rw * sw
+        hw = horizon_mults.get((agent.name, h_cfg["key"]), 1.0)
+        eff_w = w * rw * sw * hw
         vote["confidence"] = round(min(vote.get("confidence", 50) * eff_w, 97), 1)
         vote["weight"] = round(eff_w, 3)
         vote["weight_breakdown"] = {
             "base": round(w, 3),
             "regime": round(rw, 3),
             "symbol": round(sw, 3),
+            "horizon": round(hw, 3),
         }
         votes.append(vote)
     return votes, ind
@@ -1462,6 +1471,19 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
                 pool, _horizon_htf_trend, sym, h_cfg["key"]
             )
         weights = LEARNING.get_weights()
+        # Stack regime / symbol / horizon meta-learning multipliers on top
+        # of the base weights so the WebSocket path matches the REST path's
+        # calibration. Each defaults to 1.0 until enough samples accumulate.
+        regime_label_ws = (ind.get("market_regime") or {}).get("label", "unknown")
+        try:
+            regime_mults_ws = meta_learning.get_regime_multipliers()
+            symbol_mults_ws = meta_learning.get_symbol_multipliers()
+        except Exception:
+            regime_mults_ws, symbol_mults_ws = {}, {}
+        try:
+            horizon_mults_ws = LEARNING.get_horizon_multipliers()
+        except Exception:
+            horizon_mults_ws = {}
 
         await websocket.send_text(json.dumps({
             "type": "status",
@@ -1472,8 +1494,18 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
         def run_agent(agent):
             vote = agent.analyze(df, ind)
             w = weights.get(agent.name, 1.0)
-            vote["confidence"] = round(min(vote.get("confidence", 50) * w, 97), 1)
-            vote["weight"] = round(w, 3)
+            rw = regime_mults_ws.get((agent.name, regime_label_ws), 1.0)
+            sw = symbol_mults_ws.get((agent.name, sym), 1.0)
+            hw = horizon_mults_ws.get((agent.name, h_cfg["key"]), 1.0)
+            eff_w = w * rw * sw * hw
+            vote["confidence"] = round(min(vote.get("confidence", 50) * eff_w, 97), 1)
+            vote["weight"] = round(eff_w, 3)
+            vote["weight_breakdown"] = {
+                "base": round(w, 3),
+                "regime": round(rw, 3),
+                "symbol": round(sw, 3),
+                "horizon": round(hw, 3),
+            }
             vote["method"] = getattr(agent, "method", "")
             return vote
 

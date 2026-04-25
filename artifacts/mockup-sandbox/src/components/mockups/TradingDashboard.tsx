@@ -387,18 +387,37 @@ export default function TradingDashboard() {
   const spikeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Chart setup ─────────────────────────────────────────────────────────
+  // Tear-down helper. Centralised so EVERY ref that holds a series-or-primitive
+  // is cleared before the chart is disposed — otherwise the WebSocket live-tick
+  // handler keeps calling .update() on freed objects and lightweight-charts
+  // throws "Object is disposed", which then bubbles up through
+  // @replit/vite-plugin-runtime-error-modal as the red overlay.
+  const disposeChart = useCallback(() => {
+    if (chartRef.current) {
+      try { chartRef.current.remove(); } catch {}
+      chartRef.current = null;
+    }
+    candleRef.current = null;
+    forecastRef.current = null;
+    postForecastRef.current = null;
+    targetLineRef.current = null;
+    stopLineRef.current = null;
+    historyMarkersRef.current = null;
+    // Live-tick refs (these were the silent leak: still pointing at disposed
+    // series after a chart rebuild, so the next live_price tick blew up).
+    volSeriesRef.current = null;
+    lastCandleRef.current = null;
+    lastVolBarRef.current = null;
+    prevDayVolRef.current = 0;
+    avgVol20Ref.current = 0;
+    spikeAlertedTimeRef.current = 0;
+    spikeMarkersRef.current = null;
+    spikeMarkerListRef.current = [];
+  }, []);
+
   const loadChart = useCallback(async (sym: string, p: string) => {
     if (!chartContainerRef.current) return;
-    if (chartRef.current) {
-      chartRef.current.remove();
-      chartRef.current = null;
-      candleRef.current = null;
-      forecastRef.current = null;
-      postForecastRef.current = null;
-      targetLineRef.current = null;
-      stopLineRef.current = null;
-      historyMarkersRef.current = null;
-    }
+    disposeChart();
     const container = chartContainerRef.current;
     const chart = createChart(container, {
       width: container.clientWidth,
@@ -645,21 +664,31 @@ export default function TradingDashboard() {
   }, []);
 
   const drawPrediction = useCallback((j: Judgment) => {
-    if (!chartRef.current || !j.forecast_line?.length) return;
+    // Capture the chart instance ONCE so all subsequent ops target the same
+    // chart — avoids the race where the ref is replaced by a parallel
+    // loadChart() mid-draw and we end up calling addSeries() on a disposed
+    // chart object.
+    const chart = chartRef.current;
+    if (!chart || !j.forecast_line?.length) return;
     const st = signalStyle(j.signal);
 
-    // Remove old forecast
-    if (forecastRef.current) { try { chartRef.current.removeSeries(forecastRef.current); } catch {} forecastRef.current = null; }
-    if (postForecastRef.current) { try { chartRef.current.removeSeries(postForecastRef.current); } catch {} postForecastRef.current = null; }
-    if (targetLineRef.current) { try { chartRef.current.removeSeries(targetLineRef.current); } catch {} targetLineRef.current = null; }
-    if (stopLineRef.current) { try { chartRef.current.removeSeries(stopLineRef.current); } catch {} stopLineRef.current = null; }
+    // Remove old forecast (defensive try/catch — chart may have been disposed
+    // between the capture above and this point if a re-render fires)
+    if (forecastRef.current) { try { chart.removeSeries(forecastRef.current); } catch {} forecastRef.current = null; }
+    if (postForecastRef.current) { try { chart.removeSeries(postForecastRef.current); } catch {} postForecastRef.current = null; }
+    if (targetLineRef.current) { try { chart.removeSeries(targetLineRef.current); } catch {} targetLineRef.current = null; }
+    if (stopLineRef.current) { try { chart.removeSeries(stopLineRef.current); } catch {} stopLineRef.current = null; }
 
     if (j.signal === "HOLD") return;
+
+    // Bail if the chart was swapped while we cleaned up old series
+    if (chartRef.current !== chart) return;
 
     // ── Main prediction line — solid + thick + titled "PREDICTION"
     // Solid (not dashed) so it looks like a real continuation of the price
     // chart; the title legend tells the user which line is the model's call.
-    const forecast = chartRef.current.addSeries(LineSeries, {
+    try {
+    const forecast = chart.addSeries(LineSeries, {
       color: st.hex, lineWidth: 3, lineStyle: 0,
       title: `PREDICTION (${j.signal === "BUY_CALL" ? "↑ CALL" : "↓ PUT"})`,
       crosshairMarkerVisible: true, lastValueVisible: true,
@@ -693,7 +722,7 @@ export default function TradingDashboard() {
       const scoreTxt = typeof j.post_forecast_score === "number"
         ? ` (${j.post_forecast_score >= 0 ? "+" : ""}${j.post_forecast_score.toFixed(2)})`
         : "";
-      const post = chartRef.current.addSeries(LineSeries, {
+      const post = chart.addSeries(LineSeries, {
         color: postColor, lineWidth: 2, lineStyle: 2,
         title: `AFTER PREDICTION — ${modeLabel}${scoreTxt}`,
         crosshairMarkerVisible: true, lastValueVisible: false,
@@ -714,7 +743,7 @@ export default function TradingDashboard() {
       : j.forecast_line[j.forecast_line.length - 1].time) as UTCTimestamp;
 
     if (j.target_price) {
-      const tgt = chartRef.current.addSeries(LineSeries, {
+      const tgt = chart.addSeries(LineSeries, {
         color: "#10b981", lineWidth: 1, lineStyle: 1, title: `TARGET $${j.target_price}`,
       });
       const ts0 = j.forecast_line[0].time as UTCTimestamp;
@@ -723,7 +752,7 @@ export default function TradingDashboard() {
       targetLineRef.current = tgt;
     }
     if (j.stop_loss) {
-      const stp = chartRef.current.addSeries(LineSeries, {
+      const stp = chart.addSeries(LineSeries, {
         color: "#ef4444", lineWidth: 1, lineStyle: 1, title: `STOP $${j.stop_loss}`,
       });
       const ts0 = j.forecast_line[0].time as UTCTimestamp;
@@ -731,7 +760,12 @@ export default function TradingDashboard() {
       createSeriesMarkers(stp, [{ time: lastWindowTs, position: "belowBar", color: "#ef4444", shape: "arrowDown", text: `STOP $${j.stop_loss}` }]);
       stopLineRef.current = stp;
     }
-    chartRef.current.timeScale().scrollToRealTime();
+    try { chart.timeScale().scrollToRealTime(); } catch {}
+    } catch (err) {
+      // Chart was disposed mid-draw (parallel loadChart fired). Safe to ignore —
+      // the next drawPrediction on the freshly-built chart will redraw cleanly.
+      console.debug("drawPrediction: chart disposed mid-draw, skipping", err);
+    }
   }, []);
 
   // ── Initial chart load + reload on toggle of any indicator ───────────
@@ -740,18 +774,28 @@ export default function TradingDashboard() {
       if (judgment) drawPrediction(judgment);
     });
     const resize = () => {
-      if (chartRef.current && chartContainerRef.current)
-        chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
+      if (chartRef.current && chartContainerRef.current) {
+        try {
+          chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
+        } catch {}
+      }
     };
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
   }, [symbol, period, indicators_visible]);
 
   // ── Redraw prediction when judgment arrives ───────────────────────────
+  // CHANGED: just overlay the prediction on the existing chart instead of
+  // tearing the whole chart down. Rebuilding the entire chart on every
+  // judgment update was racing against the WebSocket-handler's rebuild
+  // (and against this effect re-firing while a prior load was still in
+  // flight) which is what produced the "Object is disposed" overlay.
   useEffect(() => {
-    if (judgment && chartRef.current)
-      loadChart(symbol, period).then(() => drawPrediction(judgment));
-  }, [judgment]);
+    if (!judgment) return;
+    if (chartRef.current) {
+      drawPrediction(judgment);
+    }
+  }, [judgment, drawPrediction]);
 
   // ── Load Fear & Greed and political news ──────────────────────────────
   const loadFearGreed = useCallback(async (force = false) => {
@@ -1112,7 +1156,16 @@ export default function TradingDashboard() {
         setStatus("");
         setTab("signal");
         loadFearGreed();
-        loadChart(symRef.current, periodRef.current).then(() => drawPrediction(j));
+        // Note: setJudgment(j) above triggers the [judgment] effect which
+        // calls drawPrediction. Don't rebuild the chart here — that race was
+        // the source of the "Object is disposed" runtime overlay.
+        if (chartRef.current) {
+          drawPrediction(j);
+        } else {
+          // Edge case: judgment arrived before the initial chart finished
+          // building. Trigger a load and overlay once it's ready.
+          loadChart(symRef.current, periodRef.current).then(() => drawPrediction(j));
+        }
       } else if (msg.type === "error") {
         setStatus(`❌ ${msg.message}`);
         setAnalyzing(false);

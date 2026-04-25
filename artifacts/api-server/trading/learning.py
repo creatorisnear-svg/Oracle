@@ -597,6 +597,56 @@ def get_weight_history(limit: int = 30) -> list:
     return events[:limit]
 
 
+def get_horizon_multipliers(min_samples: int = 10) -> dict:
+    """Per-horizon agent calibration multipliers.
+
+    Same architectural pattern as `meta_learning.get_regime_multipliers()`
+    and `get_symbol_multipliers()` — defaults to 1.0 (no effect) and only
+    activates once enough horizon-specific samples have accumulated, then
+    applies a bounded multiplier in [0.7, 1.3].
+
+    Why this matters: an agent's edge is HORIZON-DEPENDENT.
+    • SentimentAgent reads news headlines. News takes hours-to-days to
+      play out → great for swing/position, useless for 5-min intraday.
+    • MomentumAgent reads ROC/breakouts. Strong on intraday/day where
+      momentum carries within session → reverts on multi-week position.
+    • RiskAgent reads ATR + regime → roughly horizon-symmetric.
+    The current global agent_weights table averages all of this together,
+    so a Sentiment agent that's 70% on swing and 40% on intraday gets
+    the same mediocre weight everywhere. Per-horizon weighting separates
+    those into two lanes, like the existing per-regime/per-symbol lanes.
+
+    Returns: {(agent_name, horizon): multiplier}
+    """
+    out: dict = {}
+    try:
+        conn = get_conn()
+        rows = conn.execute("""
+            SELECT ap.agent_name, p.horizon,
+                   COUNT(*) AS total,
+                   SUM(ap.was_correct) AS correct
+            FROM agent_performance ap
+            JOIN predictions p ON p.id = ap.prediction_id
+            WHERE p.horizon IS NOT NULL
+              AND ap.was_correct IS NOT NULL
+            GROUP BY ap.agent_name, p.horizon
+        """).fetchall()
+        conn.close()
+        for r in rows:
+            total = r["total"] or 0
+            if total < min_samples:
+                continue
+            acc = (r["correct"] or 0) / total
+            # Map 0.30..0.70 → 0.7..1.3 (same shape as the regime mapping
+            # so users see consistent magnitudes in the UI).
+            mult = 1.0 + (acc - 0.5) * 1.0
+            mult = max(0.7, min(1.3, mult))
+            out[(r["agent_name"], r["horizon"])] = round(mult, 3)
+    except Exception as e:
+        logger.warning(f"get_horizon_multipliers: {e}")
+    return out
+
+
 def get_recent_predictions(symbol: str, limit: int = 20) -> list:
     conn = get_conn()
     rows = conn.execute("""
@@ -621,6 +671,14 @@ class LearningSystem:
     def get_weights(self) -> dict:
         """Return {agent_name: weight_float}."""
         return {name: info["weight"] for name, info in get_agent_weights().items()}
+
+    def get_horizon_multipliers(self, min_samples: int = 10) -> dict:
+        """Per-(agent, horizon) calibration multipliers. See module docstring."""
+        try:
+            return get_horizon_multipliers(min_samples=min_samples)
+        except Exception as e:
+            logger.warning(f"LearningSystem.get_horizon_multipliers: {e}")
+            return {}
 
     def save_prediction(self, symbol: str, signal: str, confidence: float,
                         entry_price: float, target_price: float, stop_loss: float,

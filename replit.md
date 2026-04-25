@@ -395,5 +395,17 @@ Every signal includes a `kelly` field with regime-aware position sizing:
 - `artifacts/api-server: API Server` — Python FastAPI on PORT (port 8080)
 - `artifacts/mockup-sandbox: Component Preview Server` — React Vite on PORT (port 8081)
 
+## v6.6 — "Object is disposed" runtime overlay fix + per-horizon agent calibration
+
+**Chart bug fix (TradingDashboard.tsx)**
+The runtime overlay was caused by THREE separate code paths each calling `loadChart()` in parallel — the indicator-toggle effect, the `[judgment]` effect, AND the WebSocket `judgment` handler. Whichever one finished last would dispose the chart series the other two were still writing into.
+- Added a `disposeChart()` helper that nulls every series-holding ref (forecast, post-forecast, target, stop, vol, spike markers, last-candle/bar caches) so live-tick updates can no-op cleanly after disposal.
+- Refactored `drawPrediction` to capture `const chart = chartRef.current` once at the top, guard with `if (chartRef.current !== chart) return`, and wrap the body in `try/catch` that just debug-logs disposal-mid-draw races.
+- Removed duplicate `loadChart()` from the `[judgment]` effect and the WS judgment handler — they now just call `drawPrediction(j)` to overlay on the existing chart. The chart only rebuilds on actual `[symbol, period, indicators_visible]` changes.
+- All `chart.applyOptions/timeScale()` ops are now in `try/catch` blocks so a stray resize after dispose can't crash.
+
+**Per-horizon agent calibration (learning.py + server.py)**
+A SentimentAgent that's 70% accurate on swing trades but 40% on intraday currently averages to a meaningless ~55% global weight. Added `get_horizon_multipliers()` mirroring the existing `get_regime_multipliers()` / `get_symbol_multipliers()` pattern: JOINs `agent_performance.prediction_id` → `predictions.horizon`, computes per-(agent, horizon) accuracy, returns a multiplier in [0.7, 1.3] once ≥10 samples accumulate (defaults to 1.0 otherwise). Wired into BOTH the REST `_run_agents` path AND the WebSocket analyze path so `eff_w = base × regime × symbol × horizon`. The WS path also got the regime/symbol multipliers it was previously missing — both paths now use identical calibration. The `weight_breakdown` field on each vote now exposes the horizon component so the UI can show it.
+
 ## Post-Prediction Continuation Model (agents.py ~1978-2150)
 The "after prediction" line shown beyond target/stop is **stock-specific**, not a 3-bucket lookup. A continuous score in [-1,+1] is built from per-stock readings (ROC10, MACD-hist trajectory, CMF, MFI, OBV slope, supertrend extension, weekly alignment, BB position, RSI distance), then a reversion drag pulls it negative when the move is over-extended. The score chooses a mode label (continuation/reversion/drift) AND scales the actual projected magnitude alongside the ticker's own ATR. The micro-wiggle is seeded from `hash(symbol + last_price)` so each ticker gets a unique signature wave instead of a shared sine. Score is exposed in the chart legend as e.g. `AFTER PREDICTION — CONTINUES ↑ (+0.64)`.
