@@ -177,24 +177,26 @@ def _spy_trend() -> dict:
     try:
         sdf = yf.Ticker("SPY").history(period="3mo", interval="1d")
         if sdf.empty or len(sdf) < 60:
-            result = {"dir": "flat", "pct_from_ema50": 0.0}
+            result = {"dir": "flat", "pct_from_ema50": 0.0, "change_1d": 0.0}
         else:
             closes = sdf["Close"].values
             ema50 = pd.Series(closes).ewm(span=50).mean().values
             price = float(closes[-1])
+            prev = float(closes[-2]) if len(closes) >= 2 else price
             e_now = float(ema50[-1])
             e_prev = float(ema50[-10]) if len(ema50) >= 10 else float(ema50[-1])
             slope_pct = (e_now - e_prev) / e_prev * 100 if e_prev > 0 else 0.0
             pct_from = (price - e_now) / e_now * 100 if e_now > 0 else 0.0
+            change_1d = (price - prev) / prev * 100 if prev > 0 else 0.0
             if slope_pct > 0.4 and pct_from > -1.0:
                 direction = "up"
             elif slope_pct < -0.4 and pct_from < 1.0:
                 direction = "down"
             else:
                 direction = "flat"
-            result = {"dir": direction, "pct_from_ema50": pct_from}
+            result = {"dir": direction, "pct_from_ema50": pct_from, "change_1d": change_1d}
     except Exception:
-        result = {"dir": "flat", "pct_from_ema50": 0.0}
+        result = {"dir": "flat", "pct_from_ema50": 0.0, "change_1d": 0.0}
     _DF_CACHE[key] = (result, None, time.time())
     return result
 

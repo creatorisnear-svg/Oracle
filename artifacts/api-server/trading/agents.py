@@ -86,7 +86,7 @@ def _hold(agent_name, emoji, reason):
 class PriceActionAgent:
     name = "Price Action Agent"
     emoji = "🕯️"
-    method = "Candlestick patterns + SuperTrend + Pivot breakout analysis"
+    method = "Candles + SuperTrend + Pivots + Inside-bar/Key-reversal + BB squeeze + RS vs SPY"
 
     def analyze(self, df, ind):
         try:
@@ -100,6 +100,7 @@ class PriceActionAgent:
 
             c, o, h, l = closes[-1], opens[-1], highs[-1], lows[-1]
             pc, po = closes[-2], opens[-2]
+            ph, pl = highs[-2], lows[-2]
             body = abs(c - o)
             rng = h - l
             bp = body / rng if rng > 0 else 0
@@ -121,6 +122,35 @@ class PriceActionAgent:
                 signals.append("BUY_CALL"); reasons.append(f"Strong bull candle {ind.get('rel_volume',1):.1f}×vol")
             if c < o and bp > 0.65 and ind.get("rel_volume", 1) > 1.3:
                 signals.append("BUY_PUT"); reasons.append(f"Strong bear candle {ind.get('rel_volume',1):.1f}×vol")
+
+            # NEW: Inside-bar break (3-bar continuation pattern)
+            # Yesterday's range was inside day-before's range; today breaks one side.
+            if n >= 3:
+                pph, ppl = highs[-3], lows[-3]
+                inside_yesterday = (ph <= pph) and (pl >= ppl)
+                if inside_yesterday:
+                    if h > ph and c > ph:
+                        signals.append("BUY_CALL"); reasons.append("Inside-bar break↑")
+                    elif l < pl and c < pl:
+                        signals.append("BUY_PUT"); reasons.append("Inside-bar break↓")
+
+            # NEW: 3-bar key reversal (lower-low then strong close above prev high)
+            if n >= 3 and l < lows[-2] and c > highs[-2]:
+                signals.append("BUY_CALL"); reasons.append("3-bar bullish key reversal")
+            if n >= 3 and h > highs[-2] and c < lows[-2]:
+                signals.append("BUY_PUT"); reasons.append("3-bar bearish key reversal")
+
+            # NEW: Bollinger Band squeeze breakout
+            # Tight BB width then directional close outside the band = expansion.
+            bb_width_pct = float(ind.get("bb_width_pct") or 0)
+            bb_u = float(ind.get("bb_upper") or c)
+            bb_l = float(ind.get("bb_lower") or c)
+            if bb_width_pct > 0 and bb_width_pct < 4.0:  # squeezed (<4% of price)
+                if c > bb_u and ind.get("rel_volume", 1) > 1.1:
+                    signals.append("BUY_CALL"); reasons.append(f"BB squeeze breakout↑ (w={bb_width_pct:.1f}%)")
+                elif c < bb_l and ind.get("rel_volume", 1) > 1.1:
+                    signals.append("BUY_PUT"); reasons.append(f"BB squeeze breakout↓ (w={bb_width_pct:.1f}%)")
+
             # Price structure
             if n >= 5:
                 if highs[-1] > highs[-5] and lows[-1] > lows[-5]:
@@ -142,6 +172,20 @@ class PriceActionAgent:
             ichi = ind.get("ichimoku_signal", "neutral")
             if ichi == "bullish": signals.append("BUY_CALL"); reasons.append("Above Ichimoku cloud")
             elif ichi == "bearish": signals.append("BUY_PUT"); reasons.append("Below Ichimoku cloud")
+
+            # NEW: Relative strength vs SPY
+            # If this stock outperformed SPY by >0.6% today → bullish RS,
+            # underperformed by >0.6% → bearish RS. Strong directional edge
+            # because it tells us the stock has its own momentum.
+            spy = ind.get("spy_trend") or {}
+            spy_chg = float(spy.get("change_1d") or 0)
+            stock_chg = float(ind.get("change_1d") or 0)
+            rs_diff = stock_chg - spy_chg
+            if abs(rs_diff) >= 0.6 and spy.get("dir") != "self":
+                if rs_diff > 0:
+                    signals.append("BUY_CALL"); reasons.append(f"RS vs SPY +{rs_diff:.1f}%")
+                else:
+                    signals.append("BUY_PUT"); reasons.append(f"RS vs SPY {rs_diff:.1f}%")
 
             calls = signals.count("BUY_CALL")
             puts = signals.count("BUY_PUT")
@@ -1064,35 +1108,46 @@ class JudgeAgent:
         weekly = ind.get("weekly_trend") or {"dir": "flat", "strength": 0.0}
         spy = ind.get("spy_trend") or {"dir": "flat", "pct_from_ema50": 0.0}
 
-        # 1) Chop filter — ADX measures TREND STRENGTH. <18 = no trend = noise.
-        if signal != "HOLD" and adx < 18:
-            evidence_reason = f"ADX {adx:.0f} < 18 — non-trending market, signals unreliable"
+        # 1) Chop filter — ADX measures TREND STRENGTH. <14 = extreme chop only.
+        #    (Was <18; loosened so normal mildly-trending stocks can still fire.)
+        if signal != "HOLD" and adx < 14:
+            evidence_reason = f"ADX {adx:.0f} < 14 — extreme chop, no trend to ride"
             signal = "HOLD"
             target = price
             stop = round(price - stop_mult * atr, 2)
             conf = 50.0
+        elif signal != "HOLD" and adx < 18:
+            # Mild chop — keep signal but trim confidence
+            conf *= 0.85
 
-        # 2) Weekly counter-trend filter — daily signal must agree with the
-        #    weekly trend. Going against the higher TF is a documented loser.
-        if signal == "BUY_CALL" and weekly.get("dir") == "down" and weekly.get("strength", 0) > 0.6:
-            evidence_reason = f"weekly trend down ({weekly.get('strength',0):.1f}%/wk) — daily CALL fights higher TF"
-            signal = "HOLD"
-            target = price
-            stop = round(price - stop_mult * atr, 2)
-            conf = 50.0
-        elif signal == "BUY_PUT" and weekly.get("dir") == "up" and weekly.get("strength", 0) > 0.6:
-            evidence_reason = f"weekly trend up ({weekly.get('strength',0):.1f}%/wk) — daily PUT fights higher TF"
-            signal = "HOLD"
-            target = price
-            stop = round(price - stop_mult * atr, 2)
-            conf = 50.0
+        # 2) Weekly counter-trend filter — only veto when weekly trend is
+        #    clearly strong against the daily call (>1.5%/wk slope).
+        #    Mild counter-trend (0.3-1.5%) just trims confidence.
+        wstr = float(weekly.get("strength", 0) or 0)
+        if signal == "BUY_CALL" and weekly.get("dir") == "down":
+            if wstr > 1.5:
+                evidence_reason = f"weekly trend strongly down ({wstr:.1f}%/wk) — daily CALL fights higher TF"
+                signal = "HOLD"
+                target = price
+                stop = round(price - stop_mult * atr, 2)
+                conf = 50.0
+            elif wstr > 0.4:
+                conf *= 0.85
+        elif signal == "BUY_PUT" and weekly.get("dir") == "up":
+            if wstr > 1.5:
+                evidence_reason = f"weekly trend strongly up ({wstr:.1f}%/wk) — daily PUT fights higher TF"
+                signal = "HOLD"
+                target = price
+                stop = round(price - stop_mult * atr, 2)
+                conf = 50.0
+            elif wstr > 0.4:
+                conf *= 0.85
 
         # 3) SPY context — fighting the index is allowed but penalised.
-        #    Only applies to non-index symbols (spy.dir == "self" for SPY itself).
         if signal != "HOLD" and spy.get("dir") not in ("flat", "self"):
             if (signal == "BUY_CALL" and spy["dir"] == "down") or \
                (signal == "BUY_PUT" and spy["dir"] == "up"):
-                conf *= 0.85   # 15% confidence haircut for fighting the index
+                conf *= 0.88   # 12% confidence haircut for fighting the index
 
         # ── Evidence-pillar gate ("don't fire with nothing backing it") ─
         # Count how many INDEPENDENT lines of evidence actually agree with
@@ -1118,18 +1173,31 @@ class JudgeAgent:
             pvwap = float(ind.get("price_vs_vwap_pct") or 0)
             change_1d = float(ind.get("change_1d") or 0)
 
+            # Soft per-pillar scoring (0..1) — partial agreement still counts.
+            # Pillar "confirms" at score >= 0.5. This avoids the binary
+            # "all-or-nothing" trap that was killing too many legit signals.
             if signal == "BUY_CALL":
-                trend_ok = (st_dir == "up") and (ema9 > ema21)
-                momo_ok = (macd_hist > 0) and (roc10 > 0) and (plus_di >= minus_di)
-                vol_ok = (obv_slope > 0) and (vol_trend >= 0.9)
-                price_ok = (pvwap > 0) and (change_1d >= 0)
+                trend_score = 0.5 * (st_dir == "up") + 0.5 * (ema9 > ema21)
+                momo_score = (0.34 * (macd_hist > 0)
+                              + 0.33 * (roc10 > 0)
+                              + 0.33 * (plus_di >= minus_di))
+                vol_score = 0.5 * (obv_slope > 0) + 0.5 * (vol_trend >= 0.9)
+                price_score = 0.5 * (pvwap > 0) + 0.5 * (change_1d >= 0)
             else:  # BUY_PUT
-                trend_ok = (st_dir == "down") and (ema9 < ema21)
-                momo_ok = (macd_hist < 0) and (roc10 < 0) and (minus_di >= plus_di)
-                vol_ok = (obv_slope < 0) and (vol_trend >= 0.9)
-                price_ok = (pvwap < 0) and (change_1d <= 0)
+                trend_score = 0.5 * (st_dir == "down") + 0.5 * (ema9 < ema21)
+                momo_score = (0.34 * (macd_hist < 0)
+                              + 0.33 * (roc10 < 0)
+                              + 0.33 * (minus_di >= plus_di))
+                vol_score = 0.5 * (obv_slope < 0) + 0.5 * (vol_trend >= 0.9)
+                price_score = 0.5 * (pvwap < 0) + 0.5 * (change_1d <= 0)
+
+            trend_ok = trend_score >= 0.5
+            momo_ok = momo_score >= 0.5
+            vol_ok = vol_score >= 0.5
+            price_ok = price_score >= 0.5
 
             pillars_aligned = sum([trend_ok, momo_ok, vol_ok, price_ok])
+            total_pillar_score = trend_score + momo_score + vol_score + price_score  # 0..4
             pillar_names = ["trend", "momentum", "volume", "price"]
             agreed_pillars = [n for n, ok in zip(pillar_names, [trend_ok, momo_ok, vol_ok, price_ok]) if ok]
 
@@ -1140,22 +1208,25 @@ class JudgeAgent:
                 "price": bool(price_ok),
                 "aligned": pillars_aligned,
                 "total": 4,
+                "score": round(total_pillar_score, 2),
             }
 
-            if pillars_aligned < 2:
-                # Nothing backing it up — refuse to fire.
+            # Veto only when the underlying tape is BARELY supportive
+            # (total score below 1.0 out of 4 = essentially nothing backing it).
+            if total_pillar_score < 1.0:
                 evidence_reason = (
-                    f"only {pillars_aligned}/4 pillars confirm "
-                    f"({', '.join(agreed_pillars) or 'none'}) — no evidence backing it"
+                    f"pillar score {total_pillar_score:.1f}/4.0 "
+                    f"({', '.join(agreed_pillars) or 'none confirm'}) — too weak"
                 )
                 signal = "HOLD"
                 target = price
                 stop = round(price - stop_mult * atr, 2)
                 conf = 50.0
-            elif pillars_aligned == 2:
-                # Half-confirmed — trim conviction
-                conf *= 0.80
-            # 3+ pillars → no penalty (well-supported)
+            elif total_pillar_score < 2.0:
+                conf *= 0.78  # weak (1.0-2.0)
+            elif total_pillar_score < 3.0:
+                conf *= 0.92  # moderate (2.0-3.0)
+            # 3.0+ → full confidence (well-supported)
 
         # Consensus strength: the more dissenting agents, the lower the conviction.
         # 9/9 agree → 1.00x; 5/9 → 0.75x.
