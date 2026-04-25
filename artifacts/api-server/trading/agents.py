@@ -605,7 +605,7 @@ class PoliticalAgent:
     CACHE_TTL = 120  # 2 minutes
 
     def _fetch_political_news(self) -> list:
-        if time.time() - self._cache_ts < self.CACHE_TTL and self._cache:
+        if time.time() - PoliticalAgent._cache_ts < self.CACHE_TTL and PoliticalAgent._news_cache:
             return PoliticalAgent._news_cache
 
         queries = [

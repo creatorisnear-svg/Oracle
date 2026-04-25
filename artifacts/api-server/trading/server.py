@@ -111,7 +111,15 @@ def _sync_fetch_live(symbol: str) -> dict:
                 "change_pct": cached.get("change_pct", 0), "news": cached.get("news", [])}
 
 
+_DF_CACHE: dict[tuple, tuple] = {}  # (sym, period, interval) -> (df, info, ts)
+_DF_CACHE_TTL = 30  # seconds — multiple WS clients in the same window share the fetch
+
+
 def get_df(symbol: str, period: str = "3mo", interval: str = "1d"):
+    key = (symbol, period, interval)
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < _DF_CACHE_TTL:
+        return cached[0], cached[1]
     t = yf.Ticker(symbol)
     df = t.history(period=period, interval=interval)
     if df.empty:
@@ -121,6 +129,7 @@ def get_df(symbol: str, period: str = "3mo", interval: str = "1d"):
         info = t.info
     except Exception:
         pass
+    _DF_CACHE[key] = (df, info, time.time())
     return df, info
 
 
