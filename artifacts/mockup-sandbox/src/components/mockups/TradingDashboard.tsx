@@ -230,10 +230,18 @@ export default function TradingDashboard() {
         vwapLine.setData(data.vwap.filter((d: any) => d.value != null).map((d: any) => ({ time: d.time, value: d.value })));
       }
 
-      // SuperTrend
+      // SuperTrend — green when uptrend, red when downtrend
       if (indicators_visible.st && data.supertrend?.length) {
-        const stLine = chart.addSeries(LineSeries, { color: "#a855f7", lineWidth: 2, title: "ST" });
-        stLine.setData(data.supertrend.filter((d: any) => d.value != null).map((d: any) => ({ time: d.time, value: d.value })));
+        const stUp = chart.addSeries(LineSeries, { color: "#10b981", lineWidth: 2, title: "ST↑" });
+        const stDn = chart.addSeries(LineSeries, { color: "#ef4444", lineWidth: 2, title: "ST↓" });
+        const upData = data.supertrend
+          .filter((d: any) => d.value != null && d.direction === "up")
+          .map((d: any) => ({ time: d.time as UTCTimestamp, value: d.value }));
+        const dnData = data.supertrend
+          .filter((d: any) => d.value != null && d.direction === "down")
+          .map((d: any) => ({ time: d.time as UTCTimestamp, value: d.value }));
+        if (upData.length) stUp.setData(upData);
+        if (dnData.length) stDn.setData(dnData);
       }
 
       chart.timeScale().fitContent();

@@ -690,7 +690,7 @@ class PoliticalAgent:
 class JudgeAgent:
     name = "Judge Agent"
     emoji = "⚖️"
-    THRESHOLD = 6  # out of 9 analysts
+    THRESHOLD = 5  # out of 9 analysts
 
     def decide(self, votes: list, ind: dict) -> dict:
         price = ind.get("price", 0)
