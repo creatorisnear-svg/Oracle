@@ -441,29 +441,42 @@ export default function TradingDashboard() {
               return best;
             };
 
-            const markers: any[] = [];
-            for (const p of history) {
+            // Dedupe by bar — each bar shows only ONE marker (the most recent
+            // prediction). Without this, repeated analyses on the same day
+            // pile a stack of "pending" labels onto the last candle and the
+            // chart turns into spaghetti at the right edge.
+            const byBar = new Map<number, any>();
+            const sortedHist = [...history].sort((a, b) => {
+              const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+              const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+              return ta - tb;
+            });
+
+            for (const p of sortedHist) {
               if (!p.signal || p.signal === "HOLD") continue;
               const created = p.created_at ? new Date(p.created_at).getTime() / 1000 : NaN;
               if (!Number.isFinite(created)) continue;
               const t = snapToBar(Math.floor(created));
               if (t === null) continue;
 
+              const resolved = p.outcome != null;
               const isCall = p.signal === "BUY_CALL";
               const won = p.was_correct === 1;
-              const lost = p.was_correct === 0 && p.outcome != null;
-              const pending = p.outcome == null;
+              const lost = p.was_correct === 0 && resolved;
 
-              // Bright on a win, dim on a loss, muted while pending
-              const callColor = won ? "#10b981" : lost ? "rgba(16,185,129,0.35)" : "rgba(16,185,129,0.7)";
-              const putColor  = won ? "#ef4444" : lost ? "rgba(239,68,68,0.35)"  : "rgba(239,68,68,0.7)";
-              const color = isCall ? callColor : putColor;
+              // Resolved trades are bright (win bright / loss dim). Pending
+              // trades render as a tiny faint arrow with NO text label, so
+              // they stop crowding the chart with "pending" noise.
+              const baseCall = won ? "#10b981" : lost ? "rgba(16,185,129,0.35)" : "rgba(16,185,129,0.45)";
+              const basePut  = won ? "#ef4444" : lost ? "rgba(239,68,68,0.35)"  : "rgba(239,68,68,0.45)";
+              const color = isCall ? baseCall : basePut;
 
               const entry = p.entry_price != null ? `$${Number(p.entry_price).toFixed(2)}` : "";
-              const status = pending ? "pending" : won ? "WIN" : "LOSS";
-              const text = `${isCall ? "+" : "−"} ${entry} ${status}`.trim();
+              // Only resolved trades get a price+result label. Pending ones
+              // are visual-only (the arrow itself) — no "pending" string.
+              const text = resolved ? `${isCall ? "+" : "−"} ${entry} ${won ? "WIN" : "LOSS"}` : "";
 
-              markers.push({
+              byBar.set(t as number, {
                 time: t as UTCTimestamp,
                 position: isCall ? "belowBar" : "aboveBar",
                 color,
@@ -473,10 +486,14 @@ export default function TradingDashboard() {
               });
             }
 
-            if (markers.length) {
-              // Sort ascending — required by the markers primitive
-              markers.sort((a, b) => (a.time as number) - (b.time as number));
-              historyMarkersRef.current = createSeriesMarkers(candle, markers);
+            // Cap markers to the 25 most recent and only render. Sorted
+            // ascending for the markers primitive.
+            const markers = Array.from(byBar.values())
+              .sort((a, b) => (a.time as number) - (b.time as number));
+            const trimmed = markers.slice(-25);
+
+            if (trimmed.length) {
+              historyMarkersRef.current = createSeriesMarkers(candle, trimmed);
             }
           }
         }
