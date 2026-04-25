@@ -89,10 +89,12 @@ def init_db():
         if col not in existing_cols:
             c.execute(f"ALTER TABLE agent_weights ADD COLUMN {col} {typedef}")
 
-    # Migration: add system_signal col to agent_performance if missing
+    # Migration: add system_signal + prediction_id cols to agent_performance if missing
     ap_cols = {row[1] for row in c.execute("PRAGMA table_info(agent_performance)").fetchall()}
     if "system_signal" not in ap_cols:
         c.execute("ALTER TABLE agent_performance ADD COLUMN system_signal TEXT")
+    if "prediction_id" not in ap_cols:
+        c.execute("ALTER TABLE agent_performance ADD COLUMN prediction_id INTEGER")
 
     for agent, weight in INITIAL_WEIGHTS.items():
         c.execute("""
@@ -176,9 +178,11 @@ def verify_outcomes(symbol: str, current_price: float):
 
                 c.execute("""
                     INSERT INTO agent_performance
-                    (agent_name, symbol, vote, system_signal, confidence, was_correct, created_at)
-                    VALUES (?, ?, ?, ?, 70, ?, ?)
-                """, (agent_name, symbol, agent_vote, signal, agent_correct, now))
+                    (agent_name, symbol, vote, system_signal, confidence,
+                     was_correct, created_at, prediction_id)
+                    VALUES (?, ?, ?, ?, 70, ?, ?, ?)
+                """, (agent_name, symbol, agent_vote, signal, agent_correct,
+                      now, pred_id))
         except Exception as e:
             logger.warning(f"Agent performance update: {e}")
 

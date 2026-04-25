@@ -15,6 +15,7 @@ echo Removing data files from git tracking (files stay on disk)...
 git rm --cached artifacts/api-server/trading/predictions.db 2>nul
 git rm --cached artifacts/api-server/trading/track_record.json 2>nul
 git rm --cached artifacts/api-server/trading/regime_stats.json 2>nul
+git rm --cached artifacts/api-server/trading/discovered_strategies.json 2>nul
 
 echo.
 echo Committing the untrack + the new .gitignore entries...

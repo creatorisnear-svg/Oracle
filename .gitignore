@@ -58,3 +58,4 @@ artifacts/api-server/trading/predictions.db-wal
 artifacts/api-server/trading/predictions.db-shm
 artifacts/api-server/trading/track_record.json
 artifacts/api-server/trading/regime_stats.json
+artifacts/api-server/trading/discovered_strategies.json

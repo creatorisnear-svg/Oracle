@@ -168,14 +168,13 @@ def update_regime_symbol_perf():
     cur = c.cursor()
     try:
         # 1. Per-regime per-agent accuracy
+        # Joins on prediction_id (added by the migration in learning.init_db).
         rows = cur.execute("""
             SELECT ap.agent_name, isn.regime,
                    COUNT(*) as total, SUM(ap.was_correct) as correct
             FROM agent_performance ap
-            JOIN predictions p ON p.symbol = ap.symbol
-                AND p.created_at = ap.created_at
-            JOIN indicator_snapshots isn ON isn.prediction_id = p.id
-            WHERE p.outcome IS NOT NULL
+            JOIN indicator_snapshots isn ON isn.prediction_id = ap.prediction_id
+            WHERE ap.prediction_id IS NOT NULL
             GROUP BY ap.agent_name, isn.regime
         """).fetchall()
         now = datetime.now(timezone.utc).isoformat()
