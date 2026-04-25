@@ -344,16 +344,18 @@ export default function TradingDashboard() {
     chartRef.current.timeScale().scrollToRealTime();
   }, []);
 
-  // ── Initial chart load ─────────────────────────────────────────────────
+  // ── Initial chart load + reload on toggle of any indicator ───────────
   useEffect(() => {
-    loadChart(symbol, period);
+    loadChart(symbol, period).then(() => {
+      if (judgment) drawPrediction(judgment);
+    });
     const resize = () => {
       if (chartRef.current && chartContainerRef.current)
         chartRef.current.applyOptions({ width: chartContainerRef.current.clientWidth });
     };
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [symbol, period]);
+  }, [symbol, period, indicators_visible]);
 
   // ── Redraw prediction when judgment arrives ───────────────────────────
   useEffect(() => {
