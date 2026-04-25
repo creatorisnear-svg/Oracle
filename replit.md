@@ -1,4 +1,36 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.2
+# TradeSignal AI — 9-Agent Trading Prediction System v6.2.1
+
+## Bug fixes on top of v6.2 (v6.2.1)
+Three real bugs surfaced by the v6.2 audit, all fixed:
+
+1. **IV/RV ratio was inflated 2.5×–8.8× on intraday/swing horizons.**
+   `indicators.volatility_20d` always annualises with `sqrt(252)` regardless
+   of bar interval. For swing (hourly bars) and intraday (5-min bars) it
+   under-reports realised vol by `sqrt(6.5)` and `sqrt(78)` respectively,
+   so my v6.2 IV/RV gate was firing "options expensive" on basically every
+   swing/intraday signal. **Fix:** OptionsFlowAgent now fetches a fresh
+   `period="2mo", interval="1d"` history and computes RV itself, so it's
+   always comparing apples-to-apples with yfinance's annualised IV. Live
+   AAPL test confirms ratio dropped from 5.54 → 0.97.
+
+2. **Veto reasons were silently wiped before reaching the UI.** The
+   earnings veto, chop filter, and weekly-counter-trend filter all set
+   `evidence_reason = "..."` to surface their reason — but a later
+   `evidence_reason = None` reset (start of the evidence-pillar gate
+   block) wiped it before the response was assembled. The vetoes still
+   **worked** (signal became HOLD), but the user saw "⏳ Need 5/9"
+   instead of "🛑 NO BACKING: earnings in 1.2d — binary event…".
+   **Fix:** moved `evidence_reason` and `evidence_pillars` initialisation
+   to the top of `JudgeAgent.decide()` so earlier veto blocks can populate
+   them safely.
+
+3. **`agreed_agents` / `disagreed_agents` stayed populated after a
+   HOLD veto.** Whenever any veto (overextension, chop, weekly trend,
+   earnings, conviction-dominance) flipped `signal → HOLD`, the original
+   pre-veto agreed/disagreed lists carried through. Result: UI showed
+   "BUY_CALL agreed by 6 agents" alongside `signal: HOLD` — internally
+   inconsistent. **Fix:** single cleanup block right before the
+   evidence-pillar gate clears both lists when `signal == "HOLD"`.
 
 ## Accuracy upgrades (v6.2)
 Four targeted fixes to known weaknesses in the agent stack:

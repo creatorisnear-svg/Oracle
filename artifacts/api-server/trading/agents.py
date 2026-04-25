@@ -709,7 +709,22 @@ class OptionsFlowAgent:
                     if len(near_atm) >= 3:
                         iv_med = float(near_atm["impliedVolatility"].median())
                         iv_pct = round(iv_med * 100, 1)  # 0.42 → 42.0
-                        rv = float(ind.get("volatility_20d") or 0)  # already in %
+                        # Compute realized vol from DAILY bars to match yfinance IV
+                        # (which is annualized off daily). Reusing ind["volatility_20d"]
+                        # was wrong: for swing/intraday horizons that field is built
+                        # from hourly/5-minute bars but still annualised with
+                        # sqrt(252), under-reporting RV by ~2.5×–8.8× and making
+                        # the IV/RV ratio fire "expensive" on every signal.
+                        rv = 0.0
+                        try:
+                            daily = ticker.history(period="2mo", interval="1d", auto_adjust=False)
+                            if daily is not None and len(daily) >= 21:
+                                closes_d = daily["Close"].dropna().values[-21:]
+                                if len(closes_d) >= 21:
+                                    rets = np.diff(closes_d) / closes_d[:-1]
+                                    rv = float(np.std(rets) * np.sqrt(252) * 100)
+                        except Exception:
+                            rv = float(ind.get("volatility_20d") or 0)
                         if rv > 0 and iv_pct > 0:
                             iv_rv_ratio = round(iv_pct / rv, 2)
                             reasons.append(f"IV/RV:{iv_rv_ratio:.2f} (IV {iv_pct:.0f}% vs RV {rv:.0f}%)")
@@ -1427,6 +1442,13 @@ class JudgeAgent:
         target_hit_bars = int(horizon.get("target_hit_bars", forecast_bars))
         min_pillar_score = float(horizon.get("min_pillar_score", 1.0))
 
+        # Initialised here (not later) so VETO blocks above the evidence-pillar
+        # gate can write a user-facing reason without it being wiped by a
+        # later `evidence_reason = None` reset. Fixes a silent UX bug where
+        # earnings/chop/weekly-trend HOLD reasons never reached the UI.
+        evidence_reason: str | None = None
+        evidence_pillars: dict = {}
+
         call_count = sum(1 for v in votes if v["vote"] == "BUY_CALL")
         put_count = sum(1 for v in votes if v["vote"] == "BUY_PUT")
         hold_count = sum(1 for v in votes if v["vote"] == "HOLD")
@@ -1624,6 +1646,14 @@ class JudgeAgent:
                 trim = 0.90 - min(0.10, htf_strength * 0.20)  # 0.80..0.90
                 conf *= trim
 
+        # ── Post-veto cleanup: any veto above flipped signal to HOLD,
+        # but `agreed`/`disagreed` still reflect the pre-veto vote, so the
+        # UI was showing "BUY_CALL agreed by 6 agents" alongside signal=HOLD.
+        # Reset them so the response is internally consistent.
+        if signal == "HOLD":
+            agreed = []
+            disagreed = []
+
         # ── Evidence-pillar gate ("don't fire with nothing backing it") ─
         # Count how many INDEPENDENT lines of evidence actually agree with
         # the chosen direction. Four pillars, each weighted equally:
@@ -1633,8 +1663,8 @@ class JudgeAgent:
         #   4. PRICE     – position vs VWAP + last candle vs prior close
         # Need >=3 pillars aligned for full confidence, =2 trims confidence,
         # <2 means the agents are voting on flimsy evidence -> HOLD.
-        evidence_reason = None
-        evidence_pillars: dict = {}
+        # (evidence_reason / evidence_pillars are initialised at the top of
+        # decide() so earlier veto blocks can populate them.)
         if signal != "HOLD":
             ema9 = float(ind.get("ema9") or price)
             ema21 = float(ind.get("ema21") or price)
