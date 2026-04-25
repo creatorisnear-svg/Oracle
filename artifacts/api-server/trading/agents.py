@@ -19,6 +19,7 @@ from indicators import (
     compute_adx, compute_williams_r, compute_ichimoku, compute_fibonacci,
     compute_pivot_levels, detect_rsi_divergence,
 )
+from kelly import compute_position_size
 
 logger = logging.getLogger(__name__)
 Signal = str  # "BUY_CALL" | "BUY_PUT" | "HOLD"
@@ -821,6 +822,12 @@ class JudgeAgent:
         vola = ind.get("volatility_20d", 25)
         pos_size = max(1, 5 - int(vola / 15))
 
+        # Regime-aware Kelly criterion sizing (uses back-test stats per vol regime)
+        kelly = compute_position_size(
+            signal=signal, confidence=conf, entry=entry, target=target, stop=stop,
+            atr_pct=atr_pct_now,
+        )
+
         # Get Fear & Greed from cache if available
         fg_score = FearGreedAgent._cache.get("score", 50) if FearGreedAgent._cache else 50
         fg_label = FearGreedAgent._cache.get("label", "Unknown") if FearGreedAgent._cache else "Unknown"
@@ -835,6 +842,7 @@ class JudgeAgent:
             "disagreed_agents": disagreed,
             "vote_tally": {"BUY_CALL": call_count, "BUY_PUT": put_count, "HOLD": hold_count},
             "position_size_pct": pos_size,
+            "kelly": kelly,
             "judge_reason": (
                 f"{call_count}/{total_analysts} CALL, {put_count}/{total_analysts} PUT — " +
                 (f"🛑 VETO: {veto_reason}" if veto_reason

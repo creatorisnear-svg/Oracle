@@ -29,6 +29,11 @@ interface Judgment {
   entry_trigger: string; risk_note: string;
   forecast_line?: { time: number; value: number }[];
   fear_greed_score?: number; fear_greed_label?: string;
+  kelly?: {
+    kelly_pct: number; dollars_per_10k: number; regime: string;
+    win_prob_used: number; rr_planned: number; kelly_raw: number;
+    explanation: string;
+  };
 }
 interface LivePrice {
   symbol: string; price: number; change_pct: number;
@@ -860,6 +865,29 @@ export default function TradingDashboard() {
                       <div className="text-xs text-slate-500 mb-1">POSITION SIZE</div>
                       <div className="text-xl font-black text-blue-400">{judgment.position_size_pct}% of account</div>
                     </div>
+                    {judgment.kelly && (
+                      <div className="bg-emerald-900/20 border border-emerald-800/40 rounded-xl p-3">
+                        <div className="flex items-baseline justify-between mb-1">
+                          <div className="text-xs text-emerald-400 font-bold tracking-wider">⚙️ KELLY (regime-aware)</div>
+                          <div className="text-[10px] text-slate-500 uppercase">{judgment.kelly.regime.replace("_", " ")}</div>
+                        </div>
+                        {judgment.kelly.kelly_pct > 0 ? (
+                          <>
+                            <div className="text-2xl font-black text-emerald-400 font-mono">
+                              {judgment.kelly.kelly_pct.toFixed(1)}%
+                              <span className="text-sm text-slate-400 font-normal ml-2">
+                                = ${judgment.kelly.dollars_per_10k.toFixed(0)} / $10k
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-400 mt-1">
+                              Win prob {(judgment.kelly.win_prob_used * 100).toFixed(0)}% · R:R {judgment.kelly.rr_planned.toFixed(2)} · Half-Kelly safety
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-sm text-slate-400 italic">{judgment.kelly.explanation}</div>
+                        )}
+                      </div>
+                    )}
                   </>
                 )}
               </div>

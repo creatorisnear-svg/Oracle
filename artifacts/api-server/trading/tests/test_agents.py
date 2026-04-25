@@ -143,11 +143,51 @@ def reach_pct(jj):
 hi_pct = reach_pct(j_hi); lo_pct = reach_pct(j_lo)
 check("higher conf → forecast reaches further", hi_pct >= lo_pct, f"hi={hi_pct:.0f}% lo={lo_pct:.0f}%")
 
-# Summary
+# (final summary printed after all test sections — see end of file)
+
+# ── Kelly criterion tests ──────────────────────────────────────────────
+print("\n[BONUS] Kelly criterion sizer")
+from kelly import compute_position_size, kelly_fraction, regime_for_atr_pct
+
+# Pure formula
+check("Kelly with 60% win, 1:1 R:R returns 20%", abs(kelly_fraction(0.6, 1.0) - 0.2) < 1e-9)
+check("Kelly with 50% win, 1:1 R:R returns 0%", kelly_fraction(0.5, 1.0) == 0.0)
+check("Kelly with 70% win, 2:1 R:R returns 55%", abs(kelly_fraction(0.7, 2.0) - 0.55) < 1e-9)
+check("Kelly with 0% win returns 0%", kelly_fraction(0, 1) == 0)
+
+# Regime classification
+check("ATR 1% → low_vol", regime_for_atr_pct(1.0) == "low_vol")
+check("ATR 2.5% → normal", regime_for_atr_pct(2.5) == "normal")
+check("ATR 5% → high_vol", regime_for_atr_pct(5.0) == "high_vol")
+
+# Realistic BUY_CALL signal
+sz = compute_position_size(signal="BUY_CALL", confidence=70, entry=100, target=103, stop=98, atr_pct=2.5)
+check("BUY_CALL returns positive position", sz["kelly_pct"] > 0, str(sz))
+check("position capped at 10%", sz["kelly_pct"] <= 10.0)
+check("regime detected as 'normal'", sz["regime"] == "normal")
+check("R:R computed correctly", abs(sz["rr_planned"] - 1.5) < 0.01, f"got {sz['rr_planned']}")
+check("dollars_per_10k matches percent", abs(sz["dollars_per_10k"] - sz["kelly_pct"] * 100) < 0.01)
+
+# HOLD signal → 0 position
+sz_hold = compute_position_size(signal="HOLD", confidence=50, entry=100, target=100, stop=100, atr_pct=2.5)
+check("HOLD signal → 0 position", sz_hold["kelly_pct"] == 0.0)
+
+# Higher confidence → larger position (other things equal)
+sz_lo = compute_position_size(signal="BUY_CALL", confidence=55, entry=100, target=103, stop=98, atr_pct=2.5)
+sz_hi = compute_position_size(signal="BUY_CALL", confidence=85, entry=100, target=103, stop=98, atr_pct=2.5)
+check("higher confidence → larger Kelly position", sz_hi["kelly_pct"] >= sz_lo["kelly_pct"],
+      f"hi={sz_hi['kelly_pct']} lo={sz_lo['kelly_pct']}")
+
+# Better R:R → larger position
+sz_bad = compute_position_size(signal="BUY_CALL", confidence=70, entry=100, target=101, stop=98, atr_pct=2.5)
+sz_good = compute_position_size(signal="BUY_CALL", confidence=70, entry=100, target=106, stop=98, atr_pct=2.5)
+check("better R:R → larger position", sz_good["kelly_pct"] >= sz_bad["kelly_pct"])
+
+# Final summary
 print("\n" + "=" * 60)
 n_pass = sum(1 for s, _ in results if s == PASS)
 n_fail = sum(1 for s, _ in results if s == FAIL)
-print(f"RESULTS: {n_pass} passed, {n_fail} failed (of {len(results)})")
+print(f"FINAL: {n_pass} passed, {n_fail} failed (of {len(results)})")
 if n_fail:
     print("\nFAILED:")
     for s, name in results:

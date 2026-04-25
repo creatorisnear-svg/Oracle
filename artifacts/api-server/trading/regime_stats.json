@@ -1,0 +1,23 @@
+{
+  "low_vol": {
+    "hit_rate": 0.6,
+    "avg_RR": 0.771,
+    "n": 15,
+    "avg_win_R": 0.647,
+    "avg_loss_R": 0.839
+  },
+  "normal": {
+    "hit_rate": 0.575,
+    "avg_RR": 1.01,
+    "n": 40,
+    "avg_win_R": 0.957,
+    "avg_loss_R": 0.948
+  },
+  "high_vol": {
+    "hit_rate": 0.333,
+    "avg_RR": 1.486,
+    "n": 18,
+    "avg_win_R": 1.422,
+    "avg_loss_R": 0.957
+  }
+}

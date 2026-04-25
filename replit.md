@@ -64,11 +64,17 @@ Each prediction includes:
 - Overextension veto: signals are downgraded to HOLD when RSI ≥72/≤28 or price outside Bollinger band (avoids chasing tops/bottoms)
 - Risk/Reward ratio, position size, agreed/disagreed agents
 
-## Back-Testing
-Run `python3 artifacts/api-server/trading/tests/backtest.py [SYMBOLS...]` to replay
-the agents over the last ~6 months of historical data and report directional
-accuracy, target hit rate, stop-first rate, and forecast MAE per stock.
-Default basket: AAPL NVDA MSFT TSLA SPY AMZN META.
+## Back-Testing & Tests
+- `python3 artifacts/api-server/trading/tests/test_agents.py` — 42 unit tests for all 9 agents + Judge + Kelly
+- `python3 artifacts/api-server/trading/tests/backtest.py [SYMBOLS...]` — directional accuracy + target hit + forecast MAE per stock
+- `python3 artifacts/api-server/trading/tests/compute_regime_stats.py` — re-derive `regime_stats.json` from history (used by Kelly sizer)
+
+## Kelly Position Sizer (`kelly.py`)
+Every signal includes a `kelly` field with regime-aware position sizing:
+- Volatility regime (low/normal/high) determined by ATR%
+- Win probability blended 65% from back-test history of that regime + 35% from current confidence
+- Half-Kelly applied for safety, capped at 10% of bankroll
+- Returns `kelly_pct`, `dollars_per_10k`, `regime`, `explanation`
 
 ## Chart Features
 - Full candlestick chart (3-month default)
