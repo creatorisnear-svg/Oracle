@@ -523,23 +523,23 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
         ind["_news"] = live.get("news", [])
         weights = LEARNING.get_weights()
 
-        votes = []
+        await websocket.send_text(json.dumps({
+            "type": "status",
+            "message": f"🤖 All 9 agents running in parallel..."
+        }))
 
-        # 4. Stream each agent vote
-        for agent in AGENTS:
-            await websocket.send_text(json.dumps({
-                "type": "status",
-                "message": f"{agent.emoji} {agent.name} analyzing..."
-            }))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                vote = await loop.run_in_executor(pool, agent.analyze, df, ind)
+        # 4. Run all agents in parallel, then send all votes + judgment in one message
+        def run_agent(agent):
+            vote = agent.analyze(df, ind)
             w = weights.get(agent.name, 1.0)
             vote["confidence"] = round(min(vote.get("confidence", 50) * w, 97), 1)
             vote["weight"] = round(w, 3)
             vote["method"] = getattr(agent, "method", "")
-            votes.append(vote)
-            await websocket.send_text(json.dumps({"type": "agent_vote", "vote": vote}))
-            await asyncio.sleep(0.15)
+            return vote
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(AGENTS)) as pool:
+            futs = [pool.submit(run_agent, agent) for agent in AGENTS]
+            votes = [f.result() for f in futs]
 
         # 5. Judge
         judgment = JUDGE.decide(votes, ind)
@@ -573,6 +573,7 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
         await websocket.send_text(json.dumps({
             "type": "judgment",
             "judgment": judgment,
+            "votes": votes,
             "indicators": safe_ind,
             "forecast_line": judgment.get("forecast_line", []),
             "accuracy": accuracy,

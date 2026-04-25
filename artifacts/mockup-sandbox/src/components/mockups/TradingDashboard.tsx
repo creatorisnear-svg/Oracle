@@ -173,6 +173,8 @@ export default function TradingDashboard() {
   const targetLineRef = useRef<any>(null);
   const stopLineRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const symRef = useRef<string>("");
+  const periodRef = useRef<string>("3mo");
 
   // ── Chart setup ─────────────────────────────────────────────────────────
   const loadChart = useCallback(async (sym: string, p: string) => {
@@ -393,14 +395,17 @@ export default function TradingDashboard() {
       const msg = JSON.parse(ev.data);
       if (msg.type === "live_price") setLivePrice(msg);
       else if (msg.type === "status") setStatus(msg.message);
-      else if (msg.type === "agent_vote") setVotes(prev => [...prev, msg.vote]);
       else if (msg.type === "judgment") {
-        setJudgment(msg.judgment);
+        if (msg.votes?.length) setVotes(msg.votes);
+        const j: Judgment = msg.judgment;
+        if (msg.indicators) setIndicators(msg.indicators);
+        setJudgment(j);
         if (msg.accuracy) setAccuracy(msg.accuracy);
         setAnalyzing(false);
         setStatus("");
         setTab("signal");
         loadFearGreed();
+        loadChart(symRef.current, periodRef.current).then(() => drawPrediction(j));
       } else if (msg.type === "error") {
         setStatus(`❌ ${msg.message}`);
         setAnalyzing(false);
@@ -414,6 +419,7 @@ export default function TradingDashboard() {
     const s = inputSym.trim().toUpperCase();
     if (!s) return;
     setSymbol(s);
+    symRef.current = s;
     runAnalysis(s);
   };
 
@@ -453,7 +459,7 @@ export default function TradingDashboard() {
         <div className="flex-1 flex flex-wrap gap-1.5 justify-center">
           {WATCHLIST.map(s => (
             <button key={s}
-              onClick={() => { setInputSym(s); setSymbol(s); runAnalysis(s); }}
+              onClick={() => { setInputSym(s); setSymbol(s); symRef.current = s; runAnalysis(s); }}
               className={`px-2.5 py-1 rounded text-xs font-semibold transition-all ${symbol === s ? "bg-blue-600 text-white" : "bg-slate-800 text-slate-400 hover:bg-slate-700"}`}
             >{s}</button>
           ))}
@@ -478,7 +484,7 @@ export default function TradingDashboard() {
             {(["1D","5D","1M","3M","6M"] as const).map(p => {
               const pMap: Record<string, string> = { "1D":"1d","5D":"5d","1M":"1mo","3M":"3mo","6M":"6mo" };
               return (
-                <button key={p} onClick={() => setPeriod(pMap[p])}
+                <button key={p} onClick={() => { setPeriod(pMap[p]); periodRef.current = pMap[p]; }}
                   className={`text-xs px-2.5 py-1 rounded font-semibold ${period === pMap[p] ? "bg-blue-600 text-white" : "text-slate-500 hover:text-white"}`}
                 >{p}</button>
               );
