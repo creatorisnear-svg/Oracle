@@ -1,17 +1,24 @@
-# TradeSignal AI — 8-Agent Trading Prediction System v2
+# TradeSignal AI — 9-Agent Trading Prediction System v4
 
 ## Overview
-Professional trading prediction system with 8 specialized AI agents, interactive TradingView-quality charts, a learning system that tracks prediction accuracy over time, and a live WebSocket streaming dashboard.
+Professional trading prediction system with 9 specialized AI agents running in parallel, interactive TradingView-quality charts, live options chain viewer, buy/sell volume histogram, real options expiry dates, S-curve forecast lines, and a learning system that tracks prediction accuracy over time.
 
 ## Architecture
 - **Backend**: Python FastAPI (`artifacts/api-server/trading/`)
 - **Frontend**: React + Vite + Tailwind dashboard (`artifacts/mockup-sandbox/src/`)
-- **Charts**: TradingView Lightweight Charts v5 (candlestick, EMA, Bollinger Bands, RSI, MACD, Volume)
+- **Charts**: TradingView Lightweight Charts v5 (candlestick, EMA, BB, VWAP, SuperTrend, volume histogram)
 - **Data**: Yahoo Finance via `yfinance`
 - **Learning**: SQLite database tracking predictions & adjusting agent weights over time
-- **Real-time**: WebSocket streaming — agents vote one-by-one on the live dashboard
+- **Real-time**: WebSocket — all 9 agents run in parallel, results sent in one combined message
 
-## The 8 Agents (`trading/agents.py`)
+## Local Development (Windows)
+Run this single command from the project root after `git pull`:
+```
+git pull && start cmd /k "cd artifacts/api-server && set PORT=8080 && npm run dev" && start cmd /k "cd artifacts/mockup-sandbox && set PORT=8081 && set BASE_PATH=/ && pnpm dev"
+```
+Then open `http://localhost:8081` in your browser.
+
+## The 9 Agents (`trading/agents.py`)
 
 | # | Agent | Emoji | Signal Logic |
 |---|-------|-------|--------------|
