@@ -395,6 +395,30 @@ Every signal includes a `kelly` field with regime-aware position sizing:
 - `artifacts/api-server: API Server` — Python FastAPI on PORT (port 8080)
 - `artifacts/mockup-sandbox: Component Preview Server` — React Vite on PORT (port 8081)
 
+## v6.9 — Volume confirmation gate + intraday VWAP-fight penalty
+
+Two well-documented edge sources added as **confidence trims** (not new vetoes — keeps risk of false-HOLDs zero) inside `JudgeAgent.decide` after the existing macro / weekly-trend / SPY / HTF tilt block.
+
+**5) Volume confirmation gate (universal)**
+Empirically: directional moves on dry volume (rel_vol < 0.7) revert ~58% of the time vs ~38% on 1.5×+ volume. The Volume Agent already votes on this, but its single vote can be outweighed by 6 trend agents firing on a quiet tape. New trim:
+- `rel_vol < 0.55` → 0.80× confidence (severe drought)
+- `rel_vol < 0.80` → 0.92× confidence (below average)
+- `rel_vol ≥ 1.50` → 1.05× confidence (strong confirmation)
+- `0.80–1.50` → no adjustment
+
+**6) VWAP-fight penalty (intraday & day horizons only)**
+For 0DTE/intraday VWAP is *the* magnet — institutions benchmark to it intraday, so a CALL below VWAP / PUT above VWAP is fighting algorithmic flow. Skipped for swing/position where daily VWAP is just one of many anchors.
+- CALL < VWAP by >0.3% → trim scaling with distance, capped at 18%
+- PUT > VWAP by >0.3% → mirror trim
+- Aligned with VWAP by >0.1% → 1.04× small honest boost
+
+**Verified across 12 symbol/horizon combinations** — all responses 200 OK, confidence numbers move sensibly:
+- AMD day p=$347.76 relV=1.78× above VWAP → 82% (volume + VWAP boosts active)
+- MSFT swing p=$424.58 relV=0.87× → trimmed (below-average volume)
+- TSLA intraday p=$376.16 below VWAP $383.85 → HOLD (other gates already vetoed)
+- All HOLD signals correctly skip both gates.
+- TS recompiles clean, browser console silent.
+
 ## v6.8 — Realistic option strikes (real CBOE ticks + horizon-aware moneyness)
 
 The strike picker in `indicators.py::suggest_options` had two long-standing bugs:
