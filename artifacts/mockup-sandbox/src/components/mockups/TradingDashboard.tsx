@@ -343,6 +343,7 @@ export default function TradingDashboard() {
   const postForecastRef = useRef<any>(null);
   const targetLineRef = useRef<any>(null);
   const stopLineRef = useRef<any>(null);
+  const historyMarkersRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const symRef = useRef<string>("");
   const periodRef = useRef<string>("3mo");
@@ -358,6 +359,7 @@ export default function TradingDashboard() {
       postForecastRef.current = null;
       targetLineRef.current = null;
       stopLineRef.current = null;
+      historyMarkersRef.current = null;
     }
     const container = chartContainerRef.current;
     const chart = createChart(container, {
@@ -390,6 +392,79 @@ export default function TradingDashboard() {
       });
       candle.setData(data.candles);
       candleRef.current = candle;
+
+      // ── Past prediction markers (+ for CALL, − for PUT) ───────────────
+      // Pulls every prior signal we logged for this symbol and pins a marker
+      // at its entry bar. Resolved wins glow brighter, losses are dimmed,
+      // pending trades stay neutral. Lets the user see the AI's track record
+      // overlaid on the same chart they're analyzing.
+      try {
+        const histRes = await fetch(`${API_BASE}/accuracy/${sym}`);
+        if (histRes.ok && chartRef.current === chart) {
+          const histData = await histRes.json();
+          const history: any[] = histData?.history || [];
+          if (history.length && data.candles?.length) {
+            const candleTimes: number[] = data.candles.map((c: any) => c.time as number);
+            const firstT = candleTimes[0];
+            const lastT = candleTimes[candleTimes.length - 1];
+
+            // Snap each prediction's wall-clock time to the nearest candle bar
+            // so the marker actually lands on a real data point (lightweight-
+            // charts will silently drop markers whose time isn't in the data).
+            const snapToBar = (ts: number): number | null => {
+              if (ts < firstT - 86400) return null;
+              if (ts > lastT) return lastT;
+              let lo = 0, hi = candleTimes.length - 1, best = candleTimes[0];
+              while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                const v = candleTimes[mid];
+                if (v <= ts) { best = v; lo = mid + 1; } else { hi = mid - 1; }
+              }
+              return best;
+            };
+
+            const markers: any[] = [];
+            for (const p of history) {
+              if (!p.signal || p.signal === "HOLD") continue;
+              const created = p.created_at ? new Date(p.created_at).getTime() / 1000 : NaN;
+              if (!Number.isFinite(created)) continue;
+              const t = snapToBar(Math.floor(created));
+              if (t === null) continue;
+
+              const isCall = p.signal === "BUY_CALL";
+              const won = p.was_correct === 1;
+              const lost = p.was_correct === 0 && p.outcome != null;
+              const pending = p.outcome == null;
+
+              // Bright on a win, dim on a loss, muted while pending
+              const callColor = won ? "#10b981" : lost ? "rgba(16,185,129,0.35)" : "rgba(16,185,129,0.7)";
+              const putColor  = won ? "#ef4444" : lost ? "rgba(239,68,68,0.35)"  : "rgba(239,68,68,0.7)";
+              const color = isCall ? callColor : putColor;
+
+              const entry = p.entry_price != null ? `$${Number(p.entry_price).toFixed(2)}` : "";
+              const status = pending ? "pending" : won ? "WIN" : "LOSS";
+              const text = `${isCall ? "+" : "−"} ${entry} ${status}`.trim();
+
+              markers.push({
+                time: t as UTCTimestamp,
+                position: isCall ? "belowBar" : "aboveBar",
+                color,
+                shape: isCall ? "arrowUp" : "arrowDown",
+                text,
+                size: 1,
+              });
+            }
+
+            if (markers.length) {
+              // Sort ascending — required by the markers primitive
+              markers.sort((a, b) => (a.time as number) - (b.time as number));
+              historyMarkersRef.current = createSeriesMarkers(candle, markers);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("history markers load failed", e);
+      }
 
       // EMA lines
       if (indicators_visible.ema && data.ema?.length) {
