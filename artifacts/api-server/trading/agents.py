@@ -1972,57 +1972,115 @@ class JudgeAgent:
                         target_hit_idx = i
                 forecast.append({"time": ts, "value": round(proj, 2)})
 
-        # ── Post-prediction continuation ────────────────────────────────────
+        # ── Post-prediction continuation (stock-specific) ───────────────────
         # The trader's ACTUAL question isn't just "will target hit?" — it's
         # "what happens AFTER target hits, so I know whether to take profits
-        # at the target or let it run?". A correct CALL that hits target then
-        # collapses 4% is a losing trade if you held. So we project a few extra
-        # bars beyond the main forecast showing the most likely follow-through:
-        #   • Strong trend (ADX≥25) + aligned HTF  → continuation, target × 1.3
-        #   • Weak trend or RSI extreme (>70/<30)  → mean reversion pullback
-        #   • Mixed                                → drift back toward entry
-        # This is what tells the user "take profit at target, don't get greedy".
+        # at the target or let it run?". The previous version bucketed every
+        # stock into one of three identical shapes using only RSI/ADX/HTF,
+        # so two completely different tickers ended up with visually identical
+        # post-forecasts. The version below scores continuation strength on a
+        # CONTINUOUS [-1, +1] scale from many stock-specific signals (momentum,
+        # money flow, OBV, supertrend extension, BB position, MACD trajectory,
+        # weekly alignment, RSI distance from neutral) and scales the actual
+        # projected magnitude by that score AND the ticker's own ATR. The
+        # micro-wiggle is seeded per-symbol so each ticker gets its own
+        # signature wave instead of a shared sine.
         post_forecast = []
         post_forecast_mode = None
         post_forecast_note = ""
+        post_forecast_score = 0.0
         if signal != "HOLD" and forecast:
             last_pt = forecast[-1]
             last_ts = int(last_pt["time"])
             last_val = float(last_pt["value"])
-            adx_val = safe_float(ind.get("adx", 0))
-            rsi_val = safe_float(ind.get("rsi", 50))
-            htf_dir = (weekly.get("dir") if isinstance(weekly, dict) else "flat") or "flat"
 
-            extreme_overbought = signal == "BUY_CALL" and rsi_val >= 72
-            extreme_oversold   = signal == "BUY_PUT"  and rsi_val <= 28
-            strong_trend = adx_val >= 25
-            htf_aligned = (
-                (signal == "BUY_CALL" and htf_dir == "up") or
-                (signal == "BUY_PUT"  and htf_dir == "down")
+            sym_for_post = (ind.get("_symbol") or "STOCK").upper()
+            dir_sign = 1.0 if signal == "BUY_CALL" else -1.0
+
+            # Per-stock readings (each is a [-1,+1] tilt where +1 = aligned
+            # with the trade direction and biases toward continuation)
+            rsi_val   = safe_float(ind.get("rsi14") or ind.get("rsi") or 50)
+            adx_val   = safe_float(ind.get("adx", 0))
+            macd_h    = safe_float(ind.get("macd_hist", 0))
+            macd_h_p  = safe_float(ind.get("macd_hist_prev", macd_h))
+            cmf_val   = safe_float(ind.get("cmf", 0))
+            mfi_val   = safe_float(ind.get("mfi", 50))
+            obv_slope = safe_float(ind.get("obv_slope_10d_pct", 0))
+            roc10     = safe_float(ind.get("roc10", 0))
+            roc20     = safe_float(ind.get("roc20", 0))
+            st_dir    = (ind.get("supertrend_dir") or "flat")
+            st_dist   = safe_float(ind.get("supertrend_dist_pct", 0))
+            bb_u      = safe_float(ind.get("bb_upper", 0))
+            bb_l      = safe_float(ind.get("bb_lower", 0))
+            bb_m      = safe_float(ind.get("bb_mid", price))
+            bb_pos    = ((price - bb_l) / (bb_u - bb_l)) if bb_u > bb_l else 0.5
+            atr_pct_v = safe_float(ind.get("atr_pct", 1.0))
+            htf_dir   = (weekly.get("dir") if isinstance(weekly, dict) else "flat") or "flat"
+
+            # Continuation contributions (each clamped to [-1,+1])
+            def _clip(x, lo=-1.0, hi=1.0):
+                return max(lo, min(hi, x))
+
+            momentum_c   = _clip((roc10 / 5.0) * dir_sign)               # ±5% ROC = full
+            macd_traj_c  = _clip(((macd_h - macd_h_p) / max(abs(macd_h) + 0.01, 0.05)) * dir_sign)
+            cmf_c        = _clip((cmf_val * 5.0) * dir_sign)             # ±0.20 CMF = full
+            mfi_c        = _clip(((mfi_val - 50) / 30.0) * dir_sign)
+            obv_c        = _clip((obv_slope / 25.0) * dir_sign)          # ±25% slope = full
+            adx_c        = _clip((adx_val - 18.0) / 20.0)                # trend persistence (no sign)
+            st_c         = _clip(((1 if st_dir == "up" else -1) * dir_sign) * (1 - min(st_dist / 8.0, 1.0)))
+            htf_c        = (1.0 if (signal == "BUY_CALL" and htf_dir == "up") or
+                                   (signal == "BUY_PUT"  and htf_dir == "down")
+                            else (-0.5 if htf_dir != "flat" else 0.0))
+
+            # Reversion drag — extension at extremes pulls the score negative
+            #   • Far past BB upper on a CALL or far below BB lower on a PUT
+            #   • Stretched RSI in the trade direction
+            #   • Supertrend distance > ~6% (extended)
+            rev_drag = 0.0
+            if signal == "BUY_CALL":
+                rev_drag += max(0.0, (bb_pos - 0.85)) * 4.0          # >0.85 of BB band
+                rev_drag += max(0.0, (rsi_val - 65) / 20.0)          # 65→0, 85→1
+            else:
+                rev_drag += max(0.0, (0.15 - bb_pos)) * 4.0
+                rev_drag += max(0.0, (35 - rsi_val) / 20.0)
+            rev_drag += max(0.0, (st_dist - 6.0) / 6.0)
+
+            # Weighted blend → continuation score in [-1,+1]
+            cont_raw = (
+                momentum_c  * 0.22 +
+                macd_traj_c * 0.14 +
+                cmf_c       * 0.10 +
+                mfi_c       * 0.08 +
+                obv_c       * 0.10 +
+                st_c        * 0.10 +
+                htf_c       * 0.16 +
+                adx_c       * 0.10 * (1 if abs(momentum_c) > 0 else 0)
             )
+            post_forecast_score = round(_clip(cont_raw - rev_drag * 0.55), 3)
 
-            if extreme_overbought or extreme_oversold:
-                post_forecast_mode = "reversion"
-                post_forecast_note = (
-                    f"RSI {rsi_val:.0f} is extreme — expect a pullback after target. "
-                    "Take profits at target rather than holding."
-                )
-            elif strong_trend and htf_aligned:
+            # Bucket into a human-readable mode (the score still drives the curve)
+            if post_forecast_score >= 0.30:
                 post_forecast_mode = "continuation"
                 post_forecast_note = (
-                    f"Strong trend (ADX {adx_val:.0f}) aligned with weekly {htf_dir}. "
-                    "Target may overshoot — consider trailing stop."
+                    f"Follow-through is strong (score {post_forecast_score:+.2f}) — "
+                    f"momentum/flow/HTF aligned. Target may overshoot; consider trailing stop."
+                )
+            elif post_forecast_score <= -0.30:
+                post_forecast_mode = "reversion"
+                post_forecast_note = (
+                    f"Snap-back risk (score {post_forecast_score:+.2f}) — price is stretched "
+                    f"(BB pos {bb_pos:.2f}, RSI {rsi_val:.0f}). Take profits at target."
                 )
             else:
                 post_forecast_mode = "drift"
                 post_forecast_note = (
-                    "Mixed follow-through — price likely drifts back toward entry "
-                    "after target. Don't hold past the target."
+                    f"Mixed follow-through (score {post_forecast_score:+.2f}). "
+                    f"Expect a slow drift; don't hold far past target."
                 )
 
             # Build the post-window timestamps (continue same cadence)
             post_ts: list[int] = []
-            extra_bars = max(3, forecast_bars // 3)
+            extra_bars = max(4, forecast_bars // 3)
             dt2 = datetime.fromtimestamp(last_ts, tz=timezone.utc)
             if bar_minutes >= 24 * 60:
                 while len(post_ts) < extra_bars:
@@ -2045,24 +2103,39 @@ class JudgeAgent:
                     elif t2 > dtime(20, 0):
                         dt2 = (dt2 + timedelta(days=1)).replace(hour=13, minute=30, second=0, microsecond=0)
 
-            # Project the post-window values per mode
-            move_atr = float(atr) if atr else (last_val * 0.005)
+            # Magnitude scales with stock's own ATR AND continuation score
+            atr_unit = float(atr) if atr else max(last_val * (atr_pct_v / 100.0), last_val * 0.003)
+            score_mag = abs(post_forecast_score)            # 0..1
+            full_move_atr = abs(last_val - entry)           # how far the trade itself moved
+
+            # Per-symbol deterministic seed for the wave overlay so two
+            # different tickers don't share the same micro-pattern.
+            seed_int = sum(ord(c) for c in sym_for_post) + int(round(last_val * 100)) % 9973
+            phase  = (seed_int % 360) * (np.pi / 180.0)
+            freq   = 1.4 + (seed_int % 7) * 0.18            # 1.4..2.5 cycles
+            wig_amp = atr_unit * (0.05 + (seed_int % 5) * 0.015)  # 0.05..0.11 ATR
+
+            n_post = max(len(post_ts), 1)
             for j, ts in enumerate(post_ts):
-                p2 = (j + 1) / max(len(post_ts), 1)
+                p2 = (j + 1) / n_post
                 if post_forecast_mode == "continuation":
-                    # Keep going in trade direction, decelerating
-                    extra = move_atr * 0.6 * (1 - (1 - p2) ** 2)
-                    val = last_val + extra if signal == "BUY_CALL" else last_val - extra
+                    # Continue in trade direction, decelerating; magnitude
+                    # scales with score and the stock's ATR (NOT a fixed ratio)
+                    extra = atr_unit * (0.55 + score_mag * 0.85) * (1 - (1 - p2) ** 2)
+                    val = last_val + dir_sign * extra
                 elif post_forecast_mode == "reversion":
-                    # Pull back ~50% of the trade move toward entry
-                    pullback = abs(last_val - entry) * 0.5 * p2
-                    val = last_val - pullback if signal == "BUY_CALL" else last_val + pullback
-                else:  # drift
-                    # Slow drift ~20% back toward entry
-                    pullback = abs(last_val - entry) * 0.2 * p2
-                    val = last_val - pullback if signal == "BUY_CALL" else last_val + pullback
-                # Light noise to mirror real-tape feel
-                val += np.sin((j + 1) * 1.7) * move_atr * 0.08
+                    # Pull back a fraction of the trade's own move; deeper as
+                    # the reversion score gets more negative
+                    pullback = full_move_atr * (0.35 + score_mag * 0.45) * p2
+                    val = last_val - dir_sign * pullback
+                else:  # drift — gentle, score-tilted
+                    bias = post_forecast_score                # signed in [-0.3,+0.3]
+                    extra = atr_unit * 0.20 * p2 * (1 + bias) * dir_sign
+                    pullback = full_move_atr * 0.10 * p2
+                    val = last_val + extra - dir_sign * pullback
+                # Per-symbol wiggle (decays so the line settles by the end)
+                wiggle = wig_amp * np.sin(phase + p2 * np.pi * freq) * (1 - p2 * 0.55)
+                val += wiggle
                 post_forecast.append({"time": ts, "value": round(val, 2)})
 
         vola = ind.get("volatility_20d", 25)
@@ -2177,6 +2250,7 @@ class JudgeAgent:
             "post_forecast_line": post_forecast,
             "post_forecast_mode": post_forecast_mode,
             "post_forecast_note": post_forecast_note,
+            "post_forecast_score": post_forecast_score,
             "fear_greed_score": fg_score,
             "fear_greed_label": fg_label,
         }

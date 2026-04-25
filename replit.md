@@ -394,3 +394,6 @@ Every signal includes a `kelly` field with regime-aware position sizing:
 ## Workflows
 - `artifacts/api-server: API Server` — Python FastAPI on PORT (port 8080)
 - `artifacts/mockup-sandbox: Component Preview Server` — React Vite on PORT (port 8081)
+
+## Post-Prediction Continuation Model (agents.py ~1978-2150)
+The "after prediction" line shown beyond target/stop is **stock-specific**, not a 3-bucket lookup. A continuous score in [-1,+1] is built from per-stock readings (ROC10, MACD-hist trajectory, CMF, MFI, OBV slope, supertrend extension, weekly alignment, BB position, RSI distance), then a reversion drag pulls it negative when the move is over-extended. The score chooses a mode label (continuation/reversion/drift) AND scales the actual projected magnitude alongside the ticker's own ATR. The micro-wiggle is seeded from `hash(symbol + last_price)` so each ticker gets a unique signature wave instead of a shared sine. Score is exposed in the chart legend as e.g. `AFTER PREDICTION — CONTINUES ↑ (+0.64)`.

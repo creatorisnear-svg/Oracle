@@ -65,6 +65,7 @@ interface Judgment {
   post_forecast_line?: { time: number; value: number }[];
   post_forecast_mode?: "continuation" | "reversion" | "drift" | null;
   post_forecast_note?: string;
+  post_forecast_score?: number;
   fear_greed_score?: number; fear_greed_label?: string;
   kelly?: {
     kelly_pct: number; dollars_per_10k: number; regime: string;
@@ -605,9 +606,14 @@ export default function TradingDashboard() {
       const postColor = j.post_forecast_mode === "continuation" ? st.hex
                        : j.post_forecast_mode === "reversion" ? "#f59e0b"
                        : "#94a3b8";
+      // Score badge in the title — keeps the legend honest about HOW strong
+      // the follow-through score is for THIS ticker (different per stock).
+      const scoreTxt = typeof j.post_forecast_score === "number"
+        ? ` (${j.post_forecast_score >= 0 ? "+" : ""}${j.post_forecast_score.toFixed(2)})`
+        : "";
       const post = chartRef.current.addSeries(LineSeries, {
         color: postColor, lineWidth: 2, lineStyle: 2,
-        title: `AFTER PREDICTION — ${modeLabel}`,
+        title: `AFTER PREDICTION — ${modeLabel}${scoreTxt}`,
         crosshairMarkerVisible: true, lastValueVisible: false,
       });
       // Bridge from the last forecast point so the lines visually connect
