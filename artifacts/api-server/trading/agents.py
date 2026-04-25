@@ -5,6 +5,7 @@ New agents: Fear & Greed Agent (VIX/Put-Call/momentum) + Political/Trump Agent (
 Judge fires at 6/9 consensus (67% agreement required)
 """
 import os
+import math
 import json
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ import xml.etree.ElementTree as ET
 import html as html_lib
 import logging
 import time
+from scipy.stats import norm
 
 from indicators import (
     compute_all_indicators, score_indicators_to_direction,
@@ -717,6 +719,199 @@ class PoliticalAgent:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TARGET-HIT PROBABILITY  (replaces the old "agent vote average" confidence)
+# ─────────────────────────────────────────────────────────────────────────────
+def compute_target_hit_probability(
+    *,
+    signal: str,
+    price: float,
+    target: float,
+    atr: float,
+    ind: dict,
+    days: int = 7,
+    hist_hit_rate: float | None = None,
+) -> dict:
+    """
+    Estimate the probability that price will TOUCH `target` within `days`
+    trading days, combining:
+
+      A. Volatility-grounded base rate (Brownian first-passage formula
+         using ATR as the daily vol proxy).  Far targets vs daily noise
+         → low base; close targets → high base.
+
+      B. Directional alignment of the full indicator suite —
+         SuperTrend, EMA 9/21, MACD, RSI, Bollinger position,
+         Volume (rel + up/dn ratio), OBV slope, ADX trend, Williams %R,
+         Ichimoku, VWAP, Pivot bias, Stochastic, multi-TF trend.
+         Each indicator votes for or against the target direction;
+         the weighted consensus boosts (or suppresses) the base rate.
+
+      C. Per-stock historical hit-rate calibration — blends in the
+         model's actual track record on this specific symbol.
+
+    Returns: { prob_pct, base_pct, alignment, alignment_pct_boost,
+               breakdown[], method, days }
+    """
+    # HOLD or degenerate inputs → meaningless
+    if signal == "HOLD" or price <= 0 or target == price or atr <= 0:
+        return {
+            "prob_pct": 50.0,
+            "base_pct": 50.0,
+            "alignment": 0.0,
+            "alignment_pct_boost": 0.0,
+            "breakdown": [],
+            "method": "neutral (no directional signal)",
+            "days": days,
+        }
+
+    # ── A. Volatility-based first-passage probability ───────────────
+    # 1 ATR ≈ 1 day's expected price range, so σ_daily ≈ atr / price.
+    # Probability of touching a barrier D away within N days under
+    # zero-drift Brownian motion: 2·(1 − Φ(D / (σ·√N))).
+    sigma_daily = atr / price
+    distance_pct = abs(target - price) / price
+    z = distance_pct / (sigma_daily * math.sqrt(max(days, 1)))
+    p_base = 2.0 * (1.0 - norm.cdf(z))
+    p_base = max(0.05, min(0.95, p_base))
+
+    # ── B. Directional alignment score in [-1, +1] ──────────────────
+    is_call = (signal == "BUY_CALL")
+    breakdown: list[dict] = []
+    total_signed = 0.0
+    total_weight = 0.0
+
+    def _add(name: str, weight: float, bull_cond: bool, bear_cond: bool, detail: str = ""):
+        nonlocal total_signed, total_weight
+        if bull_cond:
+            contrib = weight if is_call else -weight
+            arrow = "↑"
+        elif bear_cond:
+            contrib = -weight if is_call else weight
+            arrow = "↓"
+        else:
+            contrib = 0.0
+            arrow = "·"
+        total_signed += contrib
+        total_weight += weight
+        breakdown.append({
+            "indicator": name,
+            "direction": arrow,
+            "weight": weight,
+            "contrib": round(contrib, 2),
+            "detail": detail,
+            "supports_target": contrib > 0,
+        })
+
+    # SuperTrend (highest weight — primary trend follower)
+    st_dir = ind.get("supertrend_dir", "")
+    _add("SuperTrend", 2.0, st_dir == "up", st_dir == "down", f"{st_dir or 'n/a'}")
+
+    # Multi-timeframe composite trend
+    trend = float(ind.get("trend_score") or 0)
+    _add("Multi-TF Trend", 1.5, trend > 0.3, trend < -0.3, f"score {trend:+.2f}")
+
+    # Volume confirmation (relative volume + up/down vol balance)
+    rel_vol = float(ind.get("rel_volume") or 1.0)
+    ud_ratio = float(ind.get("up_dn_vol_ratio") or 1.0)
+    _add("Volume", 1.2,
+         rel_vol > 1.3 and ud_ratio > 1.1,
+         rel_vol > 1.3 and ud_ratio < 0.9,
+         f"{rel_vol:.2f}x avg, U/D {ud_ratio:.2f}")
+
+    # EMA 9/21 crossover
+    ema9 = float(ind.get("ema9") or 0)
+    ema21 = float(ind.get("ema21") or 0)
+    _add("EMA 9/21", 1.0, ema9 > ema21, ema9 < ema21,
+         f"{ema9:.2f} vs {ema21:.2f}")
+
+    # MACD direction
+    macd = float(ind.get("macd") or 0)
+    macd_sig = float(ind.get("macd_signal") or 0)
+    _add("MACD", 1.0, macd > macd_sig, macd < macd_sig,
+         f"{macd:+.3f} vs {macd_sig:+.3f}")
+
+    # RSI momentum (50–70 bullish, 30–50 bearish; outside = exhaustion → neutral)
+    rsi = float(ind.get("rsi14") or 50)
+    _add("RSI", 1.0, 50 < rsi < 70, 30 < rsi < 50, f"{rsi:.1f}")
+
+    # OBV slope (institutional accumulation)
+    obv_slope = float(ind.get("obv_slope_10d_pct") or 0)
+    _add("OBV Trend", 1.0, obv_slope > 1.0, obv_slope < -1.0,
+         f"{obv_slope:+.1f}% / 10d")
+
+    # ADX trend strength (only counts when DI direction is established)
+    adx = float(ind.get("adx") or 0)
+    plus_di = float(ind.get("plus_di") or 0)
+    minus_di = float(ind.get("minus_di") or 0)
+    _add("ADX Trend", 1.0,
+         adx >= 25 and plus_di > minus_di,
+         adx >= 25 and minus_di > plus_di,
+         f"ADX {adx:.0f}, +DI {plus_di:.0f} / -DI {minus_di:.0f}")
+
+    # Ichimoku cloud signal
+    ichi = str(ind.get("ichimoku_signal") or "neutral").lower()
+    _add("Ichimoku", 1.0, "bull" in ichi, "bear" in ichi, ichi)
+
+    # Bollinger Band position (z within band)
+    bb_u = float(ind.get("bb_upper") or price * 1.05)
+    bb_l = float(ind.get("bb_lower") or price * 0.95)
+    bb_m = float(ind.get("bb_mid") or price)
+    bb_w = bb_u - bb_l
+    bb_z = ((price - bb_m) / (bb_w / 2)) if bb_w > 0 else 0.0
+    _add("Bollinger Pos", 0.8, 0 < bb_z < 0.7, -0.7 < bb_z < 0,
+         f"z {bb_z:+.2f}")
+
+    # VWAP relationship
+    vwap_pct = float(ind.get("price_vs_vwap_pct") or 0)
+    _add("VWAP", 0.8, vwap_pct > 0.2, vwap_pct < -0.2, f"{vwap_pct:+.2f}%")
+
+    # Pivot bias
+    pb = str(ind.get("pivot_bias") or "neutral")
+    _add("Pivots", 0.8, "bull" in pb, "bear" in pb, pb)
+
+    # Stochastic
+    stoch = float(ind.get("stoch_k") or 50)
+    _add("Stochastic", 0.5, 50 < stoch < 80, 20 < stoch < 50, f"K {stoch:.0f}")
+
+    # Williams %R (-50..-20 = bullish zone, -80..-50 = bearish)
+    wr = float(ind.get("williams_r") or -50)
+    _add("Williams %R", 0.5, -50 < wr < -20, -80 < wr < -50, f"{wr:.0f}")
+
+    alignment = (total_signed / total_weight) if total_weight > 0 else 0.0
+    alignment = max(-1.0, min(1.0, alignment))
+
+    # ── C. Combine: aligned signals can boost up to +40%, opposing −40%
+    multiplier = 1.0 + 0.4 * alignment
+    p_signal = p_base * multiplier
+
+    # ── D. Per-stock historical calibration (blend 30% if known) ────
+    if hist_hit_rate is not None and 0 < hist_hit_rate <= 100:
+        hist_p = hist_hit_rate / 100.0
+        p_final = 0.7 * p_signal + 0.3 * hist_p
+        method = (f"vol-base {p_base*100:.0f}% × align {multiplier:.2f}x "
+                  f"→ blend hist {hist_hit_rate:.0f}%")
+    else:
+        p_final = p_signal
+        method = f"vol-base {p_base*100:.0f}% × align {multiplier:.2f}x"
+
+    p_final = max(5.0, min(95.0, p_final * 100))
+
+    # Sort breakdown by absolute contribution so the most influential
+    # indicators show first in the UI.
+    breakdown.sort(key=lambda r: abs(r["contrib"]), reverse=True)
+
+    return {
+        "prob_pct": round(p_final, 1),
+        "base_pct": round(p_base * 100, 1),
+        "alignment": round(alignment, 3),
+        "alignment_pct_boost": round((multiplier - 1.0) * 100, 1),
+        "breakdown": breakdown,
+        "method": method,
+        "days": days,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # JUDGE AGENT  (fires at 6/9 consensus = 67%)
 # ─────────────────────────────────────────────────────────────────────────────
 class JudgeAgent:
@@ -865,6 +1060,24 @@ class JudgeAgent:
         # any more accurate than low-confidence ones. Show users the truth.
         track_record = get_track_record(ind.get("_symbol", ""))
 
+        # ── REAL TARGET-HIT PROBABILITY ─────────────────────────────────
+        # Replace the old "average of agent votes" confidence with the actual
+        # probability that price will touch the target inside the forecast
+        # window. Uses volatility math (Brownian first-passage) + directional
+        # alignment of SuperTrend, EMA, MACD, RSI, BB, Volume, OBV, ADX,
+        # Williams %R, Ichimoku, VWAP, Pivot bias, Stochastic, multi-TF trend
+        # + per-stock historical hit-rate calibration.
+        hit = compute_target_hit_probability(
+            signal=signal, price=price, target=target, atr=atr, ind=ind,
+            days=7, hist_hit_rate=track_record["hit_rate"] if track_record else None,
+        )
+
+        # The headline confidence number IS the real target-hit probability now.
+        # Kelly sizer downstream gets a true probability instead of a vote average.
+        # Keep the old vote-consensus score as a separate field for transparency.
+        vote_consensus = round(conf, 1)
+        conf = hit["prob_pct"]
+
         # If the model has historically been WORSE than coin-flip on this stock,
         # cap reported confidence — refusing to overstate conviction is honest.
         if track_record and track_record["rating"] in ("weak", "poor") and signal != "HOLD":
@@ -877,6 +1090,14 @@ class JudgeAgent:
         return {
             "signal": signal,
             "confidence": round(conf, 1),
+            "target_hit_prob": round(conf, 1),         # alias for clarity in UI
+            "target_hit_base_pct": hit["base_pct"],    # vol-only baseline
+            "target_hit_alignment": hit["alignment"],  # -1..+1 indicator agreement
+            "target_hit_boost_pct": hit["alignment_pct_boost"],
+            "target_hit_breakdown": hit["breakdown"],  # per-indicator contribution
+            "target_hit_method": hit["method"],
+            "target_hit_days": hit["days"],
+            "vote_consensus_pct": vote_consensus,      # the old number, for transparency
             "entry_price": round(entry, 2),
             "stop_loss": round(stop, 2),
             "target_price": round(target, 2),

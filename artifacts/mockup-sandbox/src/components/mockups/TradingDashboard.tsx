@@ -18,8 +18,21 @@ interface AgentVote {
   agent: string; emoji: string; vote: Signal;
   confidence: number; reason: string; weight?: number; method?: string;
 }
+interface TargetHitBreakdownRow {
+  indicator: string; direction: "↑" | "↓" | "·";
+  weight: number; contrib: number; detail: string;
+  supports_target: boolean;
+}
 interface Judgment {
   signal: Signal; confidence: number;
+  target_hit_prob?: number;
+  target_hit_base_pct?: number;
+  target_hit_alignment?: number;
+  target_hit_boost_pct?: number;
+  target_hit_breakdown?: TargetHitBreakdownRow[];
+  target_hit_method?: string;
+  target_hit_days?: number;
+  vote_consensus_pct?: number;
   entry_price: number; stop_loss: number; target_price: number;
   agreed_agents: string[]; disagreed_agents: string[];
   vote_tally: { BUY_CALL: number; BUY_PUT: number; HOLD: number };
@@ -84,18 +97,100 @@ function SignalBadge({ signal, size = "md" }: { signal: Signal; size?: "sm" | "m
   return <span className={`rounded-full border ${st.bg} ${st.border} ${st.text} ${sz} shadow-lg ${st.glow}`}>{label}</span>;
 }
 
-// ─── Confidence Ring ──────────────────────────────────────────────────────
-function ConfRing({ pct, signal }: { pct: number; signal: Signal }) {
+// ─── Target-Hit Probability Ring ─────────────────────────────────────────
+function ConfRing({ pct, signal, label }: { pct: number; signal: Signal; label?: string }) {
   const r = 38; const circ = 2 * Math.PI * r;
   const st = signalStyle(signal);
   return (
-    <svg width="96" height="96" viewBox="0 0 96 96">
-      <circle cx="48" cy="48" r={r} stroke="#1e293b" strokeWidth="7" fill="none" />
-      <circle cx="48" cy="48" r={r} stroke={st.hex} strokeWidth="7" fill="none"
-        strokeDasharray={circ} strokeDashoffset={circ * (1 - pct / 100)}
-        strokeLinecap="round" transform="rotate(-90 48 48)" />
-      <text x="48" y="53" textAnchor="middle" fill={st.hex} fontSize="17" fontWeight="bold">{pct.toFixed(0)}%</text>
-    </svg>
+    <div className="flex flex-col items-center">
+      <svg width="96" height="96" viewBox="0 0 96 96">
+        <circle cx="48" cy="48" r={r} stroke="#1e293b" strokeWidth="7" fill="none" />
+        <circle cx="48" cy="48" r={r} stroke={st.hex} strokeWidth="7" fill="none"
+          strokeDasharray={circ} strokeDashoffset={circ * (1 - pct / 100)}
+          strokeLinecap="round" transform="rotate(-90 48 48)" />
+        <text x="48" y="53" textAnchor="middle" fill={st.hex} fontSize="17" fontWeight="bold">{pct.toFixed(0)}%</text>
+      </svg>
+      {label ? <div className="text-[10px] uppercase tracking-wider text-slate-400 mt-1">{label}</div> : null}
+    </div>
+  );
+}
+
+// ─── Target-Hit Probability Breakdown Panel ──────────────────────────────
+function TargetHitBreakdown({ judgment }: { judgment: Judgment }) {
+  if (judgment.signal === "HOLD" || !judgment.target_hit_breakdown?.length) return null;
+  const breakdown = judgment.target_hit_breakdown;
+  const base = judgment.target_hit_base_pct ?? 0;
+  const boost = judgment.target_hit_boost_pct ?? 0;
+  const align = judgment.target_hit_alignment ?? 0;
+  const days = judgment.target_hit_days ?? 7;
+  const supporting = breakdown.filter(r => r.contrib > 0).length;
+  const opposing = breakdown.filter(r => r.contrib < 0).length;
+  const neutral = breakdown.filter(r => r.contrib === 0).length;
+
+  return (
+    <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="text-xs text-slate-500 font-semibold">% TO TARGET — BREAKDOWN</div>
+        <div className="text-[10px] text-slate-500">{days}-day window</div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-1 text-center text-[10px]">
+        <div className="bg-slate-900/50 rounded p-1">
+          <div className="text-slate-500">Vol Base</div>
+          <div className="font-mono font-bold text-slate-300">{base.toFixed(0)}%</div>
+        </div>
+        <div className="bg-slate-900/50 rounded p-1">
+          <div className="text-slate-500">Indicator Boost</div>
+          <div className={`font-mono font-bold ${boost > 0 ? "text-emerald-400" : boost < 0 ? "text-red-400" : "text-slate-300"}`}>
+            {boost > 0 ? "+" : ""}{boost.toFixed(0)}%
+          </div>
+        </div>
+        <div className="bg-slate-900/50 rounded p-1">
+          <div className="text-slate-500">Alignment</div>
+          <div className={`font-mono font-bold ${align > 0.1 ? "text-emerald-400" : align < -0.1 ? "text-red-400" : "text-slate-300"}`}>
+            {(align * 100).toFixed(0)}
+          </div>
+        </div>
+      </div>
+
+      <div className="text-[10px] text-slate-500 text-center">
+        <span className="text-emerald-400 font-semibold">{supporting} support</span>
+        {" · "}
+        <span className="text-red-400 font-semibold">{opposing} oppose</span>
+        {" · "}
+        <span className="text-slate-400">{neutral} neutral</span>
+      </div>
+
+      <div className="space-y-1 max-h-56 overflow-y-auto pr-1">
+        {breakdown.map((row, i) => {
+          const color = row.contrib > 0 ? "text-emerald-400" : row.contrib < 0 ? "text-red-400" : "text-slate-500";
+          const bg = row.contrib > 0 ? "bg-emerald-500/5" : row.contrib < 0 ? "bg-red-500/5" : "bg-slate-700/20";
+          return (
+            <div key={i} className={`flex items-center justify-between gap-2 rounded px-2 py-1 text-xs ${bg}`}>
+              <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                <span className={`w-3 text-center ${color} font-bold`}>{row.direction}</span>
+                <span className="text-slate-300 font-medium truncate">{row.indicator}</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[10px] text-slate-500 font-mono truncate max-w-[110px]" title={row.detail}>{row.detail}</span>
+                <span className={`font-mono font-bold ${color} w-10 text-right`}>{row.contrib > 0 ? "+" : ""}{row.contrib.toFixed(1)}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {judgment.target_hit_method ? (
+        <div className="text-[10px] text-slate-500 italic pt-1 border-t border-slate-700/50">
+          {judgment.target_hit_method}
+        </div>
+      ) : null}
+      {typeof judgment.vote_consensus_pct === "number" ? (
+        <div className="text-[10px] text-slate-500 text-center">
+          Agent vote consensus: <span className="text-slate-300 font-mono">{judgment.vote_consensus_pct.toFixed(0)}%</span>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -728,7 +823,11 @@ export default function TradingDashboard() {
                     <div className="text-center space-y-2">
                       <SignalBadge signal={judgment.signal} size="lg" />
                       <div className="mt-2">
-                        <ConfRing pct={judgment.confidence} signal={judgment.signal} />
+                        <ConfRing
+                          pct={judgment.target_hit_prob ?? judgment.confidence}
+                          signal={judgment.signal}
+                          label={judgment.signal === "HOLD" ? "neutral" : `chance to hit $${judgment.target_price.toFixed(2)}`}
+                        />
                       </div>
                     </div>
                     <div className="grid grid-cols-3 gap-2">
@@ -750,6 +849,8 @@ export default function TradingDashboard() {
                       )}
                     </div>
                     <p className="text-xs text-slate-500 bg-slate-800/50 rounded-lg p-2">{judgment.judge_reason}</p>
+                    {/* Probability of hitting target — full indicator breakdown */}
+                    <TargetHitBreakdown judgment={judgment} />
                     {/* Buy/sell volume pressure */}
                     {indicators && (indicators as any).up_dn_vol_ratio !== undefined && (
                       <div className="bg-slate-800/50 rounded-lg p-2.5 space-y-1.5">
