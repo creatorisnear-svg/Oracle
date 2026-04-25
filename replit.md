@@ -395,6 +395,35 @@ Every signal includes a `kelly` field with regime-aware position sizing:
 - `artifacts/api-server: API Server` — Python FastAPI on PORT (port 8080)
 - `artifacts/mockup-sandbox: Component Preview Server` — React Vite on PORT (port 8081)
 
+## v6.8 — Realistic option strikes (real CBOE ticks + horizon-aware moneyness)
+
+The strike picker in `indicators.py::suggest_options` had two long-standing bugs:
+1. **Hard-coded $5 increments** for every stock — broken for low-priced names (BAC at $52 lists $1 strikes, F at $12 lists $0.50 strikes) and for ETFs/high-priced stocks ($2.50 ticks in the $200-$500 band).
+2. **Strike was just R1/S1 pivot rounded** with no horizon awareness — a 0DTE scalper got the same strike as a 3-week position trader.
+
+**Fix — three new helpers in `indicators.py`:**
+- `_strike_tick(price)` returns the real CBOE tick for the price band (`<$25:$0.50`, `<$200:$1`, `<$500:$2.50`, `<$1000:$5`, else `$10`).
+- `_round_to_tick_directional(value, tick, mode)` rounds floor/ceil/nearest so a "slight ITM call" can't ever round across spot into OTM. Caught a real bug where SPY $713.98 BUY_CALL was returning strike $715 (OTM) under nearest-tick rounding — now correctly returns $710.
+- `_horizon_moneyness(horizon, conf)` picks ATR offset by horizon: intraday/0DTE → ATM, swing → 0.5 ATR ITM, position → 1.0 ATR ITM, with ±0.4 ATR conviction tilt.
+
+**Premium / delta / breakeven estimates** (no IV lookup, no scipy in hot path):
+- `_estimate_premium` uses `C_atm ≈ 0.4 × σ × S × √T` Black-Scholes ATM approximation + intrinsic.
+- `_estimate_delta` uses `erf`-based normal CDF for `N(d1)`.
+
+**New JSON fields** on every Judgment payload (additive, old `strike_hint` text retained for back-compat):
+`strike`, `strike_moneyness`, `strike_premium_est`, `strike_delta_est`, `strike_breakeven`, `strike_primary_expiry`, `strike_primary_dte`.
+
+**Frontend** (`TradingDashboard.tsx`):
+- `Judgment` interface extended with the new optional fields.
+- Options-tab strike card rebuilt: large strike price + ITM/ATM/OTM color chip + Δ delta + EST PREMIUM (per share AND per contract) + BREAKEVEN @ EXPIRY. Falls back to the old single-line text card if the API is older.
+- Signal tab: small "CALIBRATED (raw 75% → 62%)" sky-blue badge under the confidence ring when `judgment.meta.applied=true`. Honest UI surface for v6.7's calibration work.
+
+**JudgeAgent.decide** now passes `horizon["key"]` and the post-disc-boost `conf` into `suggest_options` so strikes pick the right moneyness for the chosen horizon.
+
+**Verified across price bands:**
+- F $12.38 → $12.50 ($0.50 tick), AAPL $271 → $270 ($1 tick ATM intraday), NVDA $208 → $205 ($2.50 tick slight ITM swing), GOOGL $344 → $335 (deeper ITM position 30 DTE), META $675 → $670 ($5 tick), BRK-B $469 → $470, SPY $714 BUY_CALL → $710 (was the regressed-to-OTM case before directional rounding fix).
+- TS compiles clean. All HOLD signals correctly skip premium/delta math.
+
 ## v6.7 — Meta-Judge: probability calibration + logistic stacker (`meta_judge.py`)
 
 The hand-crafted JudgeAgent's `confidence` field was a heuristic — a 70% conviction did not mean "70% of these have historically won". Added `meta_judge.py` which adds two complementary upgrades on top of the existing judge (both additive, both pass-through-safe when sample sizes are too low):

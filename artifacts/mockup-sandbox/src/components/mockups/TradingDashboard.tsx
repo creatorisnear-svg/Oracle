@@ -59,6 +59,17 @@ interface Judgment {
     regime?: { label: string; vix: number; spy_above_200ema?: boolean; golden_cross?: boolean };
   } | null;
   action: string; strike_hint: string; expiry_hint: string;
+  // Realistic strike + premium estimate fields. Backend now picks a real
+  // CBOE-listed tick (e.g. $2.50 for $200-$500 stocks) and tilts ITM/ATM
+  // by horizon + conviction. All fields are optional for back-compat with
+  // older API responses that only sent `strike_hint` text.
+  strike?: number;
+  strike_moneyness?: string;
+  strike_premium_est?: number;
+  strike_delta_est?: number;
+  strike_breakeven?: number;
+  strike_primary_expiry?: string;
+  strike_primary_dte?: number;
   expiry_weekly: string; expiry_biweekly: string; expiry_monthly: string;
   entry_trigger: string; risk_note: string;
   forecast_line?: { time: number; value: number }[];
@@ -1493,6 +1504,25 @@ export default function TradingDashboard() {
                           label={judgment.signal === "HOLD" ? "neutral" : `chance to hit $${judgment.target_price.toFixed(2)}`}
                         />
                       </div>
+                      {/* Meta-judge calibration honesty badge — only shows
+                          once the calibrator/stacker has enough graded
+                          predictions to actually adjust the confidence. */}
+                      {judgment.meta?.applied && typeof judgment.meta.final === "number" && (
+                        <div className="mt-2 mx-auto flex items-center justify-center gap-1.5 text-[10px] text-sky-300/90 bg-sky-500/10 border border-sky-500/30 rounded-full px-2.5 py-0.5 w-fit"
+                             title={judgment.meta.reason || "Confidence calibrated against historical hit rate."}>
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/>
+                          </svg>
+                          <span className="font-medium">
+                            CALIBRATED
+                            {typeof judgment.meta.raw_confidence === "number" && (
+                              <span className="text-sky-400/60 ml-1">
+                                (raw {judgment.meta.raw_confidence.toFixed(0)}% → {judgment.meta.final.toFixed(0)}%)
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                      )}
                     </div>
                     <div className="grid grid-cols-3 gap-2">
                       <Stat label="CALL" value={`${judgment.vote_tally.BUY_CALL}/9`} color="text-emerald-400" />
@@ -1706,10 +1736,85 @@ export default function TradingDashboard() {
                     <div className="text-center mb-2">
                       <SignalBadge signal={judgment.signal} size="md" />
                     </div>
-                    <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
-                      <div className="text-xs text-slate-500 font-semibold">STRIKE</div>
-                      <div className="text-sm font-bold text-slate-200">{judgment.strike_hint}</div>
-                    </div>
+                    {(() => {
+                      // Rich strike card. Falls back to the legacy text hint when
+                      // the new numeric fields are missing (older server build).
+                      const hasRich = typeof judgment.strike === "number" && judgment.strike > 0
+                                       && judgment.action !== "HOLD";
+                      if (!hasRich) {
+                        return (
+                          <div className="bg-slate-800/60 rounded-xl p-3 space-y-1">
+                            <div className="text-xs text-slate-500 font-semibold">STRIKE</div>
+                            <div className="text-sm font-bold text-slate-200">{judgment.strike_hint}</div>
+                          </div>
+                        );
+                      }
+                      const moneyText = (judgment.strike_moneyness || "").toUpperCase();
+                      const isITM = moneyText.includes("ITM");
+                      const isOTM = moneyText.includes("OTM");
+                      const moneyChip = isITM
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                        : isOTM
+                        ? "bg-rose-500/20 text-rose-300 border border-rose-500/30"
+                        : "bg-amber-500/20 text-amber-300 border border-amber-500/30";
+                      const prem = judgment.strike_premium_est ?? 0;
+                      const be = judgment.strike_breakeven ?? 0;
+                      const delta = judgment.strike_delta_est ?? 0;
+                      const dte = judgment.strike_primary_dte ?? 0;
+                      const exp = judgment.strike_primary_expiry || "";
+                      const actionColor = judgment.action === "BUY_CALL"
+                        ? "text-emerald-400" : judgment.action === "BUY_PUT"
+                        ? "text-rose-400" : "text-slate-300";
+                      return (
+                        <div className="bg-slate-800/60 rounded-xl p-3 border border-slate-700/50">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-slate-500 font-semibold tracking-wider">STRIKE</span>
+                              <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${moneyChip}`}>
+                                {moneyText || "—"}
+                              </span>
+                            </div>
+                            <span className={`text-[10px] font-bold tracking-wider ${actionColor}`}>
+                              {judgment.action.replace("_", " ")}
+                            </span>
+                          </div>
+                          <div className="flex items-baseline justify-between mb-3">
+                            <div className="text-3xl font-black font-mono text-white">
+                              ${judgment.strike!.toLocaleString(undefined, {
+                                minimumFractionDigits: judgment.strike! % 1 === 0 ? 0 : 2,
+                                maximumFractionDigits: 2,
+                              })}
+                            </div>
+                            <div className="text-right">
+                              <div className="text-[10px] text-slate-500 font-semibold tracking-wider">Δ DELTA</div>
+                              <div className="text-base font-bold font-mono text-amber-300">
+                                {delta >= 0 ? "+" : ""}{delta.toFixed(2)}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-700/50">
+                            <div>
+                              <div className="text-[10px] text-slate-500 font-semibold tracking-wider">
+                                EST PREMIUM
+                                {exp && <span className="text-slate-600 normal-case font-normal"> · {exp} ({dte}D)</span>}
+                              </div>
+                              <div className="text-sm font-bold font-mono text-slate-200">
+                                ~${prem.toFixed(2)}
+                                <span className="text-[11px] text-slate-500 ml-1">
+                                  (~${Math.round(prem * 100).toLocaleString()}/contract)
+                                </span>
+                              </div>
+                            </div>
+                            <div>
+                              <div className="text-[10px] text-slate-500 font-semibold tracking-wider">BREAKEVEN @ EXPIRY</div>
+                              <div className="text-sm font-bold font-mono text-slate-200">
+                                ${be.toFixed(2)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
                     {/* Expiry date cards */}
                     {judgment.expiry_weekly && (
                       <div>

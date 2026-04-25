@@ -1891,7 +1891,12 @@ class JudgeAgent:
         conf = max(40.0, min(95.0, conf))
 
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
-        opts = suggest_options(direction, price, atr, ind)
+        # Strike now picked from real CBOE tick increments and tilted ITM/ATM
+        # by horizon + conviction. Passing horizon["key"] (intraday/day/swing/
+        # position) lets the picker choose 0DTE-friendly ATM vs swing slight-ITM.
+        opts = suggest_options(direction, price, atr, ind,
+                               horizon_key=horizon.get("key", "swing"),
+                               confidence=conf)
 
         # ── Forecast line ────────────────────────────────────────────────
         # 1. Anchor first point at NOW + current price so the line visually connects to the live chart
@@ -2240,6 +2245,16 @@ class JudgeAgent:
             },
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],
+            # NEW: numeric strike + premium/breakeven/delta/moneyness for the
+            # richer Options card in the UI. Old `strike_hint` text is kept
+            # for any older client that's still parsing it.
+            "strike": opts.get("strike", 0.0),
+            "strike_moneyness": opts.get("strike_moneyness", ""),
+            "strike_premium_est": opts.get("strike_premium_est", 0.0),
+            "strike_delta_est": opts.get("strike_delta_est", 0.0),
+            "strike_breakeven": opts.get("strike_breakeven", 0.0),
+            "strike_primary_expiry": opts.get("strike_primary_expiry", ""),
+            "strike_primary_dte": opts.get("strike_primary_dte", 0),
             "expiry_hint": opts["expiry_hint"],
             "expiry_weekly": opts.get("expiry_weekly", ""),
             "expiry_biweekly": opts.get("expiry_biweekly", ""),
