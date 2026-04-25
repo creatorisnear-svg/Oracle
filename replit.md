@@ -1,4 +1,33 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.4
+# TradeSignal AI — 9-Agent Trading Prediction System v6.5
+
+## Signal stickiness (v6.5) — the system commits to its trade plan
+Without this, agents would disagree slightly between Analyze clicks and a CALL
+would become HOLD would become PUT, even with no real reversal — the trader
+gets whiplashed. New `signal_persistence.py` keeps an open directional trade
+locked-in until something material changes:
+
+- **Same direction next time** → keep original entry/target/stop, just refresh
+  confidence and tally. No new DB row (avoids polluting per-agent stats with
+  redundant snapshots of the same logical trade).
+- **Agents go HOLD next time** → keep the active trade. Mixed agents isn't a
+  reason to abandon an open position.
+- **Opposite direction with weak consensus** → keep active. UI shows
+  "Locked in since X — only N/9 puts (need 6 to flip)".
+- **Opposite direction with STRONG (≥6/9)** → flip. A genuine reversal.
+
+Active trade = newest non-HOLD prediction in `predictions.db` for
+(symbol, horizon) that is still pending AND inside its hold window. Auto-closes
+when verify_outcomes hits target/stop OR the window elapses.
+
+UI shows a small lock badge under the signal whenever stickiness is active,
+with the human-readable reason ("Locked in since 2h ago — agents reconfirmed").
+
+## Persistent local data files (gitignored)
+All learning state is in files that survive `git pull` so the user's machine
+keeps its training. Already in `.gitignore`:
+`predictions.db` (+ wal/journal/shm), `track_record.json`, `regime_stats.json`,
+`discovered_strategies.json`. Nothing the agents learn is ever clobbered by
+a code update.
 
 ## Learning-loop fix (v6.4) — the AIs actually learn now
 Audit revealed the system was logging predictions but **never resolving

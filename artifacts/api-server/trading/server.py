@@ -29,6 +29,7 @@ from agents import (
 )
 from indicators import compute_all_indicators, safe_float
 from learning import LearningSystem
+from signal_persistence import get_active_trade, apply_persistence
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1070,20 +1071,31 @@ def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
         use_interval = h["interval"]
         df, info = get_df(sym, period=use_period, interval=use_interval)
         votes, ind = run_agents_sync(sym, df, info, horizon=h["key"])
-        judgment = JUDGE.decide(votes, ind)
-        pred_id = LEARNING.save_prediction(
-            symbol=sym, signal=judgment["signal"],
-            confidence=judgment["confidence"],
-            entry_price=judgment["entry_price"],
-            target_price=judgment["target_price"],
-            stop_loss=judgment["stop_loss"],
-            agent_votes={v["agent"]: v["vote"] for v in votes},
-            horizon=h["key"],
-        )
-        try:
-            meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
-        except Exception:
-            pass
+        raw_judgment = JUDGE.decide(votes, ind)
+
+        # Signal stickiness — keep an open trade plan locked unless target/stop
+        # hit, the hold window elapsed, or a strong reversal fires (≥6/9).
+        active = get_active_trade(sym, h["key"])
+        judgment, should_save = apply_persistence(raw_judgment, active)
+
+        if should_save:
+            pred_id = LEARNING.save_prediction(
+                symbol=sym, signal=judgment["signal"],
+                confidence=judgment["confidence"],
+                entry_price=judgment["entry_price"],
+                target_price=judgment["target_price"],
+                stop_loss=judgment["stop_loss"],
+                agent_votes={v["agent"]: v["vote"] for v in votes},
+                horizon=h["key"],
+            )
+            try:
+                meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
+            except Exception:
+                pass
+        else:
+            # Reusing an active trade — don't pollute the predictions table
+            # with a duplicate row; learning grades the original trade.
+            pred_id = (active or {}).get("id")
         # Opportunistic outcome verification — closes the learning loop on
         # REST traffic too (not just the websocket path). Cheap when nothing
         # has matured; the periodic background loop is the real workhorse.
@@ -1387,22 +1399,29 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
             votes = [f.result() for f in futs]
 
         # 5. Judge
-        judgment = JUDGE.decide(votes, ind)
+        raw_judgment = JUDGE.decide(votes, ind)
 
-        # 6. Persist
-        pred_id = LEARNING.save_prediction(
-            symbol=sym, signal=judgment["signal"],
-            confidence=judgment["confidence"],
-            entry_price=judgment["entry_price"],
-            target_price=judgment["target_price"],
-            stop_loss=judgment["stop_loss"],
-            agent_votes={v["agent"]: v["vote"] for v in votes},
-            horizon=h_cfg["key"],
-        )
-        try:
-            meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
-        except Exception:
-            pass
+        # Signal stickiness — see signal_persistence.py
+        active = get_active_trade(sym, h_cfg["key"])
+        judgment, should_save = apply_persistence(raw_judgment, active)
+
+        # 6. Persist (only on material signal changes)
+        if should_save:
+            pred_id = LEARNING.save_prediction(
+                symbol=sym, signal=judgment["signal"],
+                confidence=judgment["confidence"],
+                entry_price=judgment["entry_price"],
+                target_price=judgment["target_price"],
+                stop_loss=judgment["stop_loss"],
+                agent_votes={v["agent"]: v["vote"] for v in votes},
+                horizon=h_cfg["key"],
+            )
+            try:
+                meta_learning.save_snapshot(pred_id, sym, judgment["signal"], ind)
+            except Exception:
+                pass
+        else:
+            pred_id = (active or {}).get("id")
 
         # 7. Verify past outcomes (opportunistic — periodic loop is the workhorse)
         try:

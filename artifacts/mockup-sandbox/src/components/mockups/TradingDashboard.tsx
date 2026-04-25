@@ -45,6 +45,7 @@ interface Judgment {
   entry_price: number; stop_loss: number; target_price: number;
   agreed_agents: string[]; disagreed_agents: string[];
   vote_tally: { BUY_CALL: number; BUY_PUT: number; HOLD: number };
+  sticky?: { kind: string; open_since?: string; age?: string; from?: string; message: string } | null;
   position_size_pct: number; judge_reason: string;
   evidence_reason?: string | null;
   evidence_pillars?: {
@@ -979,6 +980,12 @@ export default function TradingDashboard() {
                   <>
                     <div className="text-center space-y-2">
                       <SignalBadge signal={judgment.signal} size="lg" />
+                      {judgment.sticky && (
+                        <div className="flex items-center justify-center gap-1.5 text-[10px] text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-full px-2.5 py-0.5 mx-auto w-fit">
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect width="14" height="10" x="5" y="11" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
+                          <span className="font-medium">{judgment.sticky.message}</span>
+                        </div>
+                      )}
                       <div className="mt-2">
                         <ConfRing
                           pct={judgment.target_hit_prob ?? judgment.confidence}
