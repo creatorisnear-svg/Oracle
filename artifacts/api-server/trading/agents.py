@@ -9,7 +9,6 @@ import math
 import json
 import re
 import numpy as np
-import pandas as pd
 import urllib.request
 import xml.etree.ElementTree as ET
 import html as html_lib
@@ -18,11 +17,8 @@ import time
 from scipy.stats import norm
 
 from indicators import (
-    compute_all_indicators, score_indicators_to_direction,
+    score_indicators_to_direction,
     suggest_options, safe_float,
-    compute_supertrend, compute_stochastic, compute_rsi, compute_vwap,
-    compute_adx, compute_williams_r, compute_ichimoku, compute_fibonacci,
-    compute_pivot_levels, detect_rsi_divergence,
 )
 from kelly import compute_position_size
 
@@ -286,7 +282,7 @@ class PriceActionAgent:
                     signals.append("BUY_PUT"); reasons.append("Lower highs + lows (downtrend)")
             # SuperTrend
             if ind.get("supertrend_dir") == "up":
-                signals.append("BUY_CALL"); reasons.append(f"SuperTrend bullish")
+                signals.append("BUY_CALL"); reasons.append("SuperTrend bullish")
             else:
                 signals.append("BUY_PUT"); reasons.append("SuperTrend bearish")
             # Pivot breakout
@@ -1501,12 +1497,9 @@ class JudgeAgent:
         # We require the winning camp to dominate by both COUNT *and* WEIGHT.
         bull_weight = float(sum(v.get("confidence", 50) for v in votes if v["vote"] == "BUY_CALL"))
         bear_weight = float(sum(v.get("confidence", 50) for v in votes if v["vote"] == "BUY_PUT"))
-        conv_dominance = (
-            bull_weight / max(bear_weight, 1.0) if bull_weight >= bear_weight
-            else bear_weight / max(bull_weight, 1.0)
-        )
-
-        risk = next((v for v in votes if v["agent"] == "Risk Agent"), {})
+        # NOTE: the conviction-dominance veto below uses bull_weight/bear_weight
+        # directly. The Risk Agent's vote is already included in `votes` and
+        # therefore in the bull/bear weight totals — no separate gate needed.
 
         # Pull overextension indicators for the "don't chase tops/bottoms" filter
         rsi = float(ind.get("rsi14") or 50)

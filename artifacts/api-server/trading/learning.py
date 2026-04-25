@@ -317,8 +317,10 @@ def _resolve_one(c: sqlite3.Cursor, row, now_iso: str) -> bool:
     high = float(df["High"].max())
     low = float(df["Low"].min())
 
-    # Determine actual directional outcome for agent grading
-    pct_close = (last_close - entry) / entry if entry else 0
+    # Determine actual directional outcome for agent grading.
+    # We use the highest/lowest excursion inside the window (not the close)
+    # because options pay off the BEST move during the trade, not just the
+    # net drift from open to close.
     pct_high = (high - entry) / entry if entry else 0
     pct_low = (low - entry) / entry if entry else 0
     if pct_high >= AGENT_GRADE_NOISE_PCT and pct_high > abs(pct_low):

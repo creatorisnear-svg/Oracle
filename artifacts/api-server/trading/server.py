@@ -1436,7 +1436,7 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
 
         await websocket.send_text(json.dumps({
             "type": "status",
-            "message": f"🤖 All 9 agents running in parallel..."
+            "message": "🤖 All 9 agents running in parallel..."
         }))
 
         # 4. Run all agents in parallel, then send all votes + judgment in one message
