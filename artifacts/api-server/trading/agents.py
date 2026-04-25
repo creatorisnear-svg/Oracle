@@ -7,6 +7,7 @@ Judge fires at 6/9 consensus (67% agreement required)
 import os
 import math
 import json
+import re
 import numpy as np
 import pandas as pd
 import urllib.request
@@ -603,24 +604,34 @@ class SentimentAgent:
         except Exception:
             return 1.0
 
+    # Pre-compile keyword patterns once. Word-bounded (\b) so "high" no longer
+    # matches "highway"/"highlight", "cut" no longer matches "executive", etc.
+    # Non-overlapping by construction, so each occurrence is counted once.
+    _BULL_RX: list = []
+    _BEAR_RX: list = []
+
+    @classmethod
+    def _patterns(cls) -> tuple[list, list]:
+        if not cls._BULL_RX:
+            cls._BULL_RX = [re.compile(rf"\b{re.escape(w)}\b") for w in cls.BULLISH]
+            cls._BEAR_RX = [re.compile(rf"\b{re.escape(w)}\b") for w in cls.BEARISH]
+        return cls._BULL_RX, cls._BEAR_RX
+
     def _score_text(self, text: str, weight: float) -> tuple[float, float]:
         bull = bear = 0.0
-        for w in self.BULLISH:
-            i = text.find(w)
-            while i != -1:
-                if self._is_negated(text, i):
+        bull_rx, bear_rx = self._patterns()
+        for rx in bull_rx:
+            for m in rx.finditer(text):
+                if self._is_negated(text, m.start()):
                     bear += weight    # flipped
                 else:
                     bull += weight
-                i = text.find(w, i + len(w))
-        for w in self.BEARISH:
-            i = text.find(w)
-            while i != -1:
-                if self._is_negated(text, i):
+        for rx in bear_rx:
+            for m in rx.finditer(text):
+                if self._is_negated(text, m.start()):
                     bull += weight
                 else:
                     bear += weight
-                i = text.find(w, i + len(w))
         return bull, bear
 
     def analyze(self, df, ind):
@@ -1113,9 +1124,12 @@ class PoliticalAgent:
     ]
 
     # Tokens that flip the meaning of a nearby keyword. Scanned within a
-    # small window before a matched phrase.
+    # small window before a matched phrase, plus a forward window for
+    # post-modifiers ("averted", "called off", "ruled out", "denied").
     NEGATIONS = ("no ", "not ", "never ", "without ", "avoids ", "averted ",
                  "no longer ", "ruled out ", "denies ", "rejects ")
+    POST_NEGATIONS = (" averted", " avoided", " called off", " halted",
+                      " ruled out", " denied", " walked back", " reversed")
 
     _news_cache: list = []
     _cache_ts: float = 0
@@ -1161,20 +1175,41 @@ class PoliticalAgent:
         PoliticalAgent._cache_ts = time.time()
         return all_news
 
-    def _negated(self, text: str, idx: int) -> bool:
-        """True if the keyword at `idx` is negated by a token in the prior ~25 chars."""
-        window = text[max(0, idx - 25):idx]
-        return any(neg in window for neg in self.NEGATIONS)
+    # Cache compiled patterns once per class (not per call).
+    _BULL_RX: list = []
+    _BEAR_RX: list = []
 
-    def _count_phrases(self, text: str, phrases: list) -> int:
-        """Count phrase hits, skipping any whose nearby context negates them."""
+    @classmethod
+    def _patterns(cls) -> tuple[list, list]:
+        if not cls._BULL_RX:
+            cls._BULL_RX = [re.compile(rf"\b{re.escape(w)}\b") for w in cls.MARKET_BULLISH]
+            cls._BEAR_RX = [re.compile(rf"\b{re.escape(w)}\b") for w in cls.MARKET_BEARISH]
+        return cls._BULL_RX, cls._BEAR_RX
+
+    def _negated(self, text: str, idx: int, length: int) -> bool:
+        """True if the keyword spanning [idx, idx+length) is negated.
+
+        Scans both a backward window (~25 chars before) for "no/not/never/..."
+        prefixes AND a forward window (~22 chars after the phrase ends) for
+        post-modifiers like "averted", "called off", "walked back".
+        """
+        before = text[max(0, idx - 25):idx]
+        after = text[idx + length: idx + length + 22]
+        if any(neg in before for neg in self.NEGATIONS):
+            return True
+        return any(post in after for post in self.POST_NEGATIONS)
+
+    def _count_phrases(self, text: str, regexes: list) -> int:
+        """Count phrase hits, skipping any whose nearby context negates them.
+        `re.finditer` yields non-overlapping word-bounded matches, so 'tariff'
+        no longer matches inside 'tariffs raised' twice and 'cut' no longer
+        matches 'executive'.
+        """
         n = 0
-        for w in phrases:
-            i = text.find(w)
-            while i != -1:
-                if not self._negated(text, i):
+        for rx in regexes:
+            for m in rx.finditer(text):
+                if not self._negated(text, m.start(), m.end() - m.start()):
                     n += 1
-                i = text.find(w, i + len(w))
         return n
 
     def analyze(self, df, ind):
@@ -1191,8 +1226,9 @@ class PoliticalAgent:
             top_headlines = []
             for item in all_news[:15]:
                 title = (item.get("title", "") + " " + item.get("summary", "")).lower()
-                item_bull = self._count_phrases(title, self.MARKET_BULLISH)
-                item_bear = self._count_phrases(title, self.MARKET_BEARISH)
+                bull_rx, bear_rx = self._patterns()
+                item_bull = self._count_phrases(title, bull_rx)
+                item_bear = self._count_phrases(title, bear_rx)
                 bull += item_bull
                 bear += item_bear
                 if item_bull > 0 or item_bear > 0:

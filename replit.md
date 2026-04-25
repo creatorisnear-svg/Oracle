@@ -1,4 +1,45 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.2.1
+# TradeSignal AI — 9-Agent Trading Prediction System v6.2.2
+
+## Audit-round bug fixes (v6.2.2)
+Six additional bugs surfaced by the audit, all fixed:
+
+1. **Substring keyword matches in Sentiment + Political** — `text.find("high")`
+   matched "highway"/"highlight"/"highlighted"; `text.find("cut")` matched
+   "executive"/"prosecutor"; `"low"` matched "follow"/"slow"; `"war"` matched
+   "award"/"forward"; `"miss"` matched "mission"/"dismiss". **Fix:** rewrote
+   `_score_text` (Sentiment) and `_count_phrases` (Political) to use
+   pre-compiled `\b{phrase}\b` word-bounded regexes with `re.finditer`.
+   Verified: "highway service for executive customers" now scores 0/0
+   instead of false-positive bull+bear.
+
+2. **Overlapping phrase counts** — the prior `text.find(w, i + len(w))` loop
+   could double-count overlapping fragments ("tariff" inside "tariffs raised").
+   `re.finditer` yields **non-overlapping** matches by construction, so
+   "china tariff hike" now scores 2 (china tariff + tariff hike) instead of 3.
+
+3. **Asymmetric negation in PoliticalAgent** — Sentiment looked both backward
+   (~22 chars) AND forward (~30 chars for "erased"/"halted"), but Political
+   only looked backward (~25 chars). Headlines like "tariff hike averted"
+   still scored bearish. **Fix:** added `POST_NEGATIONS` tuple ("averted",
+   "called off", "walked back", "ruled out", "denied", etc.) and a forward
+   window check in `_negated()`. Verified: "tariff hike averted" → 0 bear.
+
+4. **Earnings cache key collision risk** — `(sym.upper(), "earn")` was
+   distinct today but a future helper using the same string would clash.
+   Renamed to `(sym.upper(), "_earnings_proximity")`.
+
+5. **Earnings date type-coercion fragility** — yfinance returns earnings
+   dates as a mix of `datetime.date`, `pd.Timestamp`, naive `datetime`,
+   and (in some versions) ISO strings. The previous code only handled
+   the first three. **Fix:** centralised conversion in `_coerce_to_utc_dt`
+   which handles all four shapes and returns `None` on failure.
+
+6. **`RuntimeWarning` flood from `indicators.py`** — every analyze call
+   dumped 5–10 `divide by zero` / `invalid value` warnings to the log
+   from `compute_rsi` and `compute_adx`. Both already mask the result
+   with `np.where`, but numpy still computes the division before the mask.
+   **Fix:** wrapped both in `np.errstate(divide="ignore", invalid="ignore")`.
+   Logs are now clean.
 
 ## Bug fixes on top of v6.2 (v6.2.1)
 Three real bugs surfaced by the v6.2 audit, all fixed:

@@ -90,7 +90,11 @@ def compute_rsi(closes, period=14):
         for i in range(period+1, len(closes)):
             avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
             avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
+    # Suppress divide-by-zero warning — np.where masks the result already,
+    # but the division is computed before the mask. Silencing keeps the
+    # diagnostics log readable.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100.0)
     return 100 - (100 / (1 + rs))
 
 
@@ -162,10 +166,14 @@ def compute_adx(highs, lows, closes, period=14):
     s_minus = pd.Series(minus_dm).ewm(span=period, adjust=False).mean().values
     s_atr = pd.Series(atr).ewm(span=period, adjust=False).mean().values
 
-    plus_di = np.where(s_atr > 0, 100 * s_plus / s_atr, 0)
-    minus_di = np.where(s_atr > 0, 100 * s_minus / s_atr, 0)
-    dx = np.where(plus_di + minus_di > 0,
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    # Same divide-by-zero suppression pattern — masked with np.where but the
+    # division still runs first, generating warnings on early bars where
+    # ATR is still zero / NaN.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        plus_di = np.where(s_atr > 0, 100 * s_plus / s_atr, 0)
+        minus_di = np.where(s_atr > 0, 100 * s_minus / s_atr, 0)
+        dx = np.where(plus_di + minus_di > 0,
+                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = pd.Series(dx).ewm(span=period, adjust=False).mean().values
     return adx, plus_di, minus_di
 

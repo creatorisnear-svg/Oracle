@@ -419,12 +419,41 @@ def _earnings_proximity(sym: str) -> dict:
 
     Returns {days_until: int|None, in_danger: bool, in_caution: bool, date: str}.
     Cached 30 min — earnings dates don't move intraday."""
-    key = (sym.upper(), "earn")
+    # Namespaced key so a future cache user with the same string can't collide.
+    key = (sym.upper(), "_earnings_proximity")
     cached = _DF_CACHE.get(key)
     if cached and (time.time() - cached[2]) < 1800:
         return cached[0]
 
+    import datetime as _dt
     result = {"days_until": None, "in_danger": False, "in_caution": False, "date": ""}
+
+    def _coerce_to_utc_dt(val):
+        """Best-effort convert any yfinance date/timestamp/string into an
+        aware UTC datetime. Returns None on failure."""
+        if val is None:
+            return None
+        try:
+            # pandas Timestamp / datetime-like
+            if hasattr(val, "to_pydatetime"):
+                val = val.to_pydatetime()
+            # date (not datetime) → midnight UTC
+            if isinstance(val, _dt.date) and not isinstance(val, _dt.datetime):
+                return _dt.datetime.combine(val, _dt.time(0, 0, tzinfo=_dt.timezone.utc))
+            # naive datetime → assume UTC
+            if isinstance(val, _dt.datetime):
+                return val.replace(tzinfo=_dt.timezone.utc) if val.tzinfo is None else val
+            # string fallback (e.g. "2026-04-30")
+            if isinstance(val, str):
+                try:
+                    parsed = _dt.datetime.fromisoformat(val.replace("Z", "+00:00"))
+                    return parsed.replace(tzinfo=_dt.timezone.utc) if parsed.tzinfo is None else parsed
+                except ValueError:
+                    return None
+        except Exception:
+            return None
+        return None
+
     try:
         ticker = yf.Ticker(sym)
         next_dt = None
@@ -435,9 +464,9 @@ def _earnings_proximity(sym: str) -> dict:
             if isinstance(cal, dict):
                 ed = cal.get("Earnings Date") or cal.get("earningsDate")
                 if isinstance(ed, list) and ed:
-                    next_dt = ed[0]
+                    next_dt = _coerce_to_utc_dt(ed[0])
                 elif ed:
-                    next_dt = ed
+                    next_dt = _coerce_to_utc_dt(ed)
         except Exception:
             pass
 
@@ -446,24 +475,18 @@ def _earnings_proximity(sym: str) -> dict:
             try:
                 edf = ticker.earnings_dates
                 if edf is not None and not edf.empty:
-                    import datetime as _dt
                     now_utc = _dt.datetime.now(_dt.timezone.utc)
-                    future = [d for d in edf.index
-                              if hasattr(d, "to_pydatetime")
-                              and d.to_pydatetime() >= now_utc]
+                    future = []
+                    for d in edf.index:
+                        coerced = _coerce_to_utc_dt(d)
+                        if coerced is not None and coerced >= now_utc:
+                            future.append(coerced)
                     if future:
-                        next_dt = min(future).to_pydatetime()
+                        next_dt = min(future)
             except Exception:
                 pass
 
         if next_dt is not None:
-            import datetime as _dt
-            if hasattr(next_dt, "to_pydatetime"):
-                next_dt = next_dt.to_pydatetime()
-            if isinstance(next_dt, _dt.date) and not isinstance(next_dt, _dt.datetime):
-                next_dt = _dt.datetime.combine(next_dt, _dt.time(0, 0, tzinfo=_dt.timezone.utc))
-            if next_dt.tzinfo is None:
-                next_dt = next_dt.replace(tzinfo=_dt.timezone.utc)
             now_utc = _dt.datetime.now(_dt.timezone.utc)
             days = (next_dt - now_utc).total_seconds() / 86400.0
             if days >= -1:  # ignore long-past dates
