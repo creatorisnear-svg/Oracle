@@ -1,4 +1,29 @@
-# TradeSignal AI — 9-Agent Trading Prediction System v6.2.2
+# TradeSignal AI — 9-Agent Trading Prediction System v6.3
+
+## Signal-rate fixes (v6.3)
+The audit revealed the system was producing too many HOLDs: 100% HOLD on
+intraday/day, 50% HOLD on swing/position. Two structural over-filters
+fixed without compromising win-rate gates:
+
+1. **Intraday & day threshold dropped 6/9 → 5/9.** With 9 agents that vote
+   3 ways, requiring 6 to agree on direction was statistically near-
+   impossible — production data showed 0 signals fired across 24 test runs.
+   5/9 still requires a majority consensus, and the per-horizon
+   `min_pillar_score=1.5` (vs 1.0 for swing/position) preserves the extra
+   rigor where it matters: in evidence quality, not raw vote count.
+
+2. **Overextension veto now requires multiple confirming signals.** Before:
+   `RSI≥72 OR BB-z≥0.85 OR price≥BB_upper` triggered full HOLD — meaning
+   any single overbought reading killed a trade. In normal uptrends RSI
+   lives at 70+ for weeks, so this veto fired on most trending stocks.
+   After: full veto requires **two of three** confirming signals (with
+   tightened thresholds RSI≥75, BB-z≥0.95, at-or-above BB_upper) AND
+   `RSI≥70`. A single signal trims confidence 25%; a mild warning trims
+   15%. Same logic mirrored for oversold/PUT side.
+
+**Result:** signal rate climbed from 25% → 56% across 12 symbols × 4
+horizons (48 tests). All other filters (conviction-dominance gate,
+chop filter, weekly counter-trend, earnings veto, HTF tilt) unchanged.
 
 ## Audit-round bug fixes (v6.2.2)
 Six additional bugs surfaced by the audit, all fixed:

@@ -69,7 +69,11 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 5,
         "target_hit_bars": 24,      # 2 hours
         "stop_mult": 0.7, "tgt_mult": 0.9,
-        "threshold": 6,             # need 6/9 (stricter — 5m bars are noisy)
+        # Lowered from 6→5 because 6/9 produced a 100% HOLD rate in
+        # production (statistically rare for 9 agents to all agree on
+        # 5-minute noise). The stricter min_pillar_score=1.5 already
+        # provides the extra rigor for noisy intraday bars.
+        "threshold": 5,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",  # confirm with hourly trend
         "expiry_pref": "0DTE / weekly",
@@ -81,7 +85,9 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 15,
         "target_hit_bars": 16,      # rest of day
         "stop_mult": 0.8, "tgt_mult": 1.1,
-        "threshold": 6,
+        # Lowered from 6→5 — same reason as intraday. Pillar floor at 1.5
+        # plus the HTF tilt and conviction-dominance gates still filter.
+        "threshold": 5,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",
         "expiry_pref": "0DTE / weekly",
@@ -1568,27 +1574,44 @@ class JudgeAgent:
 
         # ── Overextension VETO ("don't chase") ──────────────────────────
         # Back-testing showed the agents pile onto strong trends and buy
-        # right at exhaustion points. Veto when price is over-extended.
+        # right at exhaustion points. The previous OR condition (any one
+        # of three readings vetoed) was firing constantly during normal
+        # trending markets where RSI lives at 70+ for weeks. Now we need
+        # at least TWO confirming overbought signals AND a meaningful
+        # RSI extreme — true exhaustion shows on multiple gauges at once.
+        # A single warning sign just trims confidence.
         veto_reason = None
         if signal == "BUY_CALL":
-            # OR condition (not AND) — either extreme overbought reading vetos
-            if rsi >= 72 or bb_z >= 0.85 or price >= bb_upper:
+            # Count confirming overbought signals
+            ob_signals = sum([rsi >= 75, bb_z >= 0.95, price >= bb_upper])
+            if ob_signals >= 2 and rsi >= 70:
                 signal = "HOLD"
                 target = price
                 stop = round(price - stop_mult * atr, 2)
                 conf = 50.0
-                veto_reason = f"overbought (RSI {rsi:.0f}, BB-z {bb_z:+.2f}) — chasing top vetoed"
+                veto_reason = (
+                    f"overbought ({ob_signals}/3 signals: RSI {rsi:.0f}, "
+                    f"BB-z {bb_z:+.2f}) — true exhaustion, vetoing"
+                )
+            elif rsi >= 72 or bb_z >= 0.85 or price >= bb_upper:
+                conf *= 0.75  # one signal — trim more aggressively
             elif rsi >= 65 or bb_z >= 0.6:
-                conf *= 0.80  # mildly extended → trim
+                conf *= 0.85  # mildly extended → light trim
         elif signal == "BUY_PUT":
-            if rsi <= 28 or bb_z <= -0.85 or price <= bb_lower:
+            os_signals = sum([rsi <= 25, bb_z <= -0.95, price <= bb_lower])
+            if os_signals >= 2 and rsi <= 30:
                 signal = "HOLD"
                 target = price
                 stop = round(price + stop_mult * atr, 2)
                 conf = 50.0
-                veto_reason = f"oversold (RSI {rsi:.0f}, BB-z {bb_z:+.2f}) — chasing bottom vetoed"
+                veto_reason = (
+                    f"oversold ({os_signals}/3 signals: RSI {rsi:.0f}, "
+                    f"BB-z {bb_z:+.2f}) — true capitulation, vetoing"
+                )
+            elif rsi <= 28 or bb_z <= -0.85 or price <= bb_lower:
+                conf *= 0.75
             elif rsi <= 35 or bb_z <= -0.6:
-                conf *= 0.80
+                conf *= 0.85
 
         # ── EARNINGS PROXIMITY VETO ─────────────────────────────────────
         # Directional options 0-2 days before earnings are essentially
