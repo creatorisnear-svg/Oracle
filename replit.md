@@ -54,12 +54,21 @@ Then open `http://localhost:8081` in your browser.
 
 ## Signal Output Format
 Each prediction includes:
-- BUY / SELL / HOLD (fires at 6/8 consensus)
-- Confidence % (weighted by learned agent accuracy)
-- Entry price, Stop loss (2×ATR), Target price (3×ATR)
-- Risk/Reward ratio
-- Position size recommendation
-- Which agents agreed / disagreed
+- BUY_CALL / BUY_PUT / HOLD (fires at 5/9 consensus)
+- Confidence % (calibrated by consensus strength + overextension)
+- Entry price, Stop loss & Target price — sized to volatility regime:
+  - low-vol (ATR <1.5%): wider 1.4×ATR stop, closer 1.0×ATR target
+  - normal: 1.1×ATR stop, 1.3×ATR target
+  - high-vol (ATR >4%): tighter 0.9×ATR stop, wider 1.6×ATR target
+- Forecast line: anchored at current price, scaled by confidence, real Mon–Fri sessions
+- Overextension veto: signals are downgraded to HOLD when RSI ≥72/≤28 or price outside Bollinger band (avoids chasing tops/bottoms)
+- Risk/Reward ratio, position size, agreed/disagreed agents
+
+## Back-Testing
+Run `python3 artifacts/api-server/trading/tests/backtest.py [SYMBOLS...]` to replay
+the agents over the last ~6 months of historical data and report directional
+accuracy, target hit rate, stop-first rate, and forecast MAE per stock.
+Default basket: AAPL NVDA MSFT TSLA SPY AMZN META.
 
 ## Chart Features
 - Full candlestick chart (3-month default)

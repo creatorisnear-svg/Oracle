@@ -703,30 +703,81 @@ class JudgeAgent:
 
         risk = next((v for v in votes if v["agent"] == "Risk Agent"), {})
 
+        # Pull overextension indicators for the "don't chase tops/bottoms" filter
+        rsi = float(ind.get("rsi14") or 50)
+        bb_upper = float(ind.get("bb_upper") or price * 1.05)
+        bb_lower = float(ind.get("bb_lower") or price * 0.95)
+        bb_mid = float(ind.get("bb_mid") or price)
+        bb_width = bb_upper - bb_lower
+        bb_z = ((price - bb_mid) / (bb_width / 2)) if bb_width > 0 else 0.0  # -1..+1 inside band, >1 outside upper
+
+        # Risk/reward sized to volatility regime: tight ATR (low-vol stocks like SPY)
+        # need wider stops + closer targets so they don't whipsaw.
+        atr_pct_now = (atr / price * 100) if price else 2.0
+        if atr_pct_now < 1.5:           # low vol (e.g. SPY, large indexes)
+            stop_mult, tgt_mult = 1.4, 1.0
+        elif atr_pct_now > 4.0:         # high vol (e.g. TSLA, NVDA in news)
+            stop_mult, tgt_mult = 0.9, 1.6
+        else:                            # normal
+            stop_mult, tgt_mult = 1.1, 1.3
+
         if call_count >= self.THRESHOLD:
             signal = "BUY_CALL"
             agreed = [v["agent"] for v in votes if v["vote"] == "BUY_CALL"]
             disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_CALL"]
             conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_CALL"]))
             entry = price
-            stop = round(price - 1.0 * atr, 2)
-            target = round(price + 1.5 * atr, 2)
+            stop = round(price - stop_mult * atr, 2)
+            target = round(price + tgt_mult * atr, 2)
         elif put_count >= self.THRESHOLD:
             signal = "BUY_PUT"
             agreed = [v["agent"] for v in votes if v["vote"] == "BUY_PUT"]
             disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_PUT"]
             conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_PUT"]))
             entry = price
-            stop = round(price + 1.0 * atr, 2)
-            target = round(price - 1.5 * atr, 2)
+            stop = round(price + stop_mult * atr, 2)
+            target = round(price - tgt_mult * atr, 2)
         else:
             signal = "HOLD"
             agreed = []
             disagreed = []
             conf = float(np.mean([v["confidence"] for v in votes])) if votes else 50
             entry = price
-            stop = round(price - 1.0 * atr, 2)
+            stop = round(price - stop_mult * atr, 2)
             target = price
+
+        # ── Overextension VETO ("don't chase") ──────────────────────────
+        # Back-testing showed the agents pile onto strong trends and buy
+        # right at exhaustion points. Veto when price is over-extended.
+        veto_reason = None
+        if signal == "BUY_CALL":
+            # OR condition (not AND) — either extreme overbought reading vetos
+            if rsi >= 72 or bb_z >= 0.85 or price >= bb_upper:
+                signal = "HOLD"
+                target = price
+                stop = round(price - stop_mult * atr, 2)
+                conf = 50.0
+                veto_reason = f"overbought (RSI {rsi:.0f}, BB-z {bb_z:+.2f}) — chasing top vetoed"
+            elif rsi >= 65 or bb_z >= 0.6:
+                conf *= 0.80  # mildly extended → trim
+        elif signal == "BUY_PUT":
+            if rsi <= 28 or bb_z <= -0.85 or price <= bb_lower:
+                signal = "HOLD"
+                target = price
+                stop = round(price + stop_mult * atr, 2)
+                conf = 50.0
+                veto_reason = f"oversold (RSI {rsi:.0f}, BB-z {bb_z:+.2f}) — chasing bottom vetoed"
+            elif rsi <= 35 or bb_z <= -0.6:
+                conf *= 0.80
+
+        # Consensus strength: the more dissenting agents, the lower the conviction.
+        # 9/9 agree → 1.00x; 5/9 → 0.75x. Keeps confidence honest.
+        if signal != "HOLD" and total_analysts > 0:
+            agree_n = call_count if signal == "BUY_CALL" else put_count
+            consensus_factor = 0.55 + 0.45 * (agree_n / total_analysts)
+            conf *= consensus_factor
+
+        conf = max(40.0, min(95.0, conf))
 
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
         opts = suggest_options(direction, price, atr, ind)
@@ -785,8 +836,10 @@ class JudgeAgent:
             "vote_tally": {"BUY_CALL": call_count, "BUY_PUT": put_count, "HOLD": hold_count},
             "position_size_pct": pos_size,
             "judge_reason": (
-                f"{call_count}/{total_analysts} CALL, {put_count}/{total_analysts} PUT — "
-                f"{'✅ CONSENSUS' if signal != 'HOLD' else f'⏳ Need {self.THRESHOLD}/{total_analysts}'}"
+                f"{call_count}/{total_analysts} CALL, {put_count}/{total_analysts} PUT — " +
+                (f"🛑 VETO: {veto_reason}" if veto_reason
+                 else ("✅ CONSENSUS" if signal != "HOLD"
+                       else f"⏳ Need {self.THRESHOLD}/{total_analysts}"))
             ),
             "action": opts["action"],
             "strike_hint": opts["strike_hint"],
