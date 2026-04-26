@@ -1,4 +1,38 @@
-# TradeSignal AI — 30-Agent Trading Prediction System v7.1.3
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.4
+
+## v7.1.4 — Threshold recalibration (everything was HOLD-ing)
+
+After v7.1.3 lit up the broken agents, the system was still HOLDing on
+every stock because the JudgeAgent's consensus thresholds were calibrated
+for 12 agents but inherited unchanged into the 30-agent population.
+
+**The arithmetic mismatch:** with 30 agents, ~17-19 are legitimately neutral
+on any given tape (Macro Events: nothing scheduled, Yield Curve: flat,
+Short Interest: low %, Dark Pool / Social: dormant by design, Seasonality:
+no edge this week, etc.) — so the typical directional pool is only 11-13
+votes. The hard threshold of 14 effectively never fires. The soft tier
+(threshold-3 = 11, AND 3:1 dominance) was also unreachable.
+
+**Fix:** Lowered all four horizon thresholds 14 → 11 (≈37% of all agents,
+~80% of the typical directional pool) and softened soft-tier dominance
+3:1 → 2:1 in `JudgeAgent.decide()`. Soft floor becomes 8/30 with a
+2:1 directional lead. All downstream gates remain intact: avg-winning
+confidence ≥56%, 1.20× conviction-weight dominance, ADX-chop, weekly
+counter-trend, overextension (RSI+BB), earnings proximity, pillar score.
+
+**Verification (8 tickers, swing horizon):**
+```
+AAPL   9C/ 4P/17H  →  BUY_CALL  @ 64.1
+MSFT  10C/ 2P/18H  →  BUY_CALL  @ 75.0
+TSLA   4C/ 5P/21H  →  HOLD      @ 52.6   (correctly: split)
+NVDA  11C/ 1P/18H  →  BUY_CALL  @ 86.5
+SPY   10C/ 1P/19H  →  BUY_CALL  @ 79.7
+AMZN  12C/ 1P/17H  →  BUY_CALL  @ 78.4
+META  12C/ 1P/17H  →  BUY_CALL  @ 85.7
+AMD   11C/ 1P/18H  →  BUY_CALL  @ 77.6
+```
+7/8 fire (one hard at 11+, six on the soft tier). TSLA correctly stays
+HOLD with mixed agent agreement — quality filter still working.
 
 ## v7.1.3 — Round-3 dead-data + over-strict-threshold sweep (5 more agents fixed)
 

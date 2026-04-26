@@ -95,12 +95,16 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 5,
         "target_hit_bars": 24,      # 2 hours
         "stop_mult": 0.7, "tgt_mult": 0.9,
-        # v7.1: 14/30 (~47% of all, ~70% of typically-voting pool). With 18
-        # new Tier-1/2/3 agents, several legitimately HOLD when their data
-        # source isn't wired (FRED, social, dark pool), so a flat 17/30 would
-        # over-restrict. Soft tier (threshold-3 = 11/30 + 3:1 dominance) plus
-        # all downstream gates still keep quality high.
-        "threshold": 14,
+        # v7.1.4: lowered from 14 → 11. With 30 agents, ~17-19 are
+        # legitimately neutral on any given tape (Macro Events: nothing
+        # scheduled, Yield Curve: flat, Short Interest: low %, Dark Pool /
+        # Social: dormant by design, etc.) so the typical directional pool
+        # is only 11-13 votes. A 14-vote hard floor effectively never fires.
+        # 11/30 ≈ 37% of all and ~80% of the typical directional pool.
+        # Soft tier becomes 8/30 + 2:1 dominance; downstream conviction,
+        # pillar, ADX-chop, weekly counter-trend, overextension and
+        # earnings gates still filter the quality bar.
+        "threshold": 11,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",  # confirm with hourly trend
         "expiry_pref": "0DTE / weekly",
@@ -112,9 +116,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 15,
         "target_hit_bars": 16,      # rest of day
         "stop_mult": 0.8, "tgt_mult": 1.1,
-        # v7.1: 14/30 — same reasoning as intraday. Pillar floor at 1.5 plus
-        # the HTF tilt and conviction-dominance gates still filter.
-        "threshold": 14,
+        "threshold": 11,            # v7.1.4: 11/30 — see intraday note
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",
         "expiry_pref": "0DTE / weekly",
@@ -126,7 +128,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 60,
         "target_hit_bars": 30,
         "stop_mult": 1.0, "tgt_mult": 1.4,
-        "threshold": 14,            # v7.1: 14/30 — HTF + conviction gates do the filtering
+        "threshold": 11,            # v7.1.4: 11/30 — see intraday note
         "min_pillar_score": 1.0,
         "htf_period": "6mo", "htf_interval": "1d",  # daily trend gate
         "expiry_pref": "weekly / 2-week",
@@ -138,7 +140,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 24 * 60,
         "target_hit_bars": 7,
         "stop_mult": 1.1, "tgt_mult": 1.3,
-        "threshold": 14,            # v7.1: 14/30
+        "threshold": 11,            # v7.1.4: 11/30 — see intraday note
         "min_pillar_score": 1.0,
         "htf_period": "1y", "htf_interval": "1wk",  # weekly trend gate
         "expiry_pref": "2-week / monthly",
@@ -3047,18 +3049,21 @@ class JudgeAgent:
         #   keeps quality high — and ALL downstream gates (pillar score,
         #   conviction-dominance ≥1.20×, ADX chop, weekly counter-trend,
         #   overextension, earnings) still apply, so weak setups still HOLD.
-        # v7.1: with 30 agents (vs 12) and several Tier-1/2/3 agents that
-        # legitimately HOLD when their data source isn't wired, the soft tier
-        # uses threshold-3 to maintain the original "consensus minus a
-        # couple abstainers" intent. Still gated by 3:1 directional dominance.
+        # v7.1.4: with 30 agents and ~17-19 typically neutral on any tape,
+        # the directional pool averages 11-13 votes. The hard threshold
+        # already dropped to 11, so the soft tier (threshold-3 = 8) catches
+        # 8-vs-anything-smaller setups. The dominance gate eased from 3:1
+        # to 2:1 — a clean 8 CALL / 4 PUT (66% of directional) is a real
+        # consensus, not a coin flip, especially with the conviction-weight
+        # and pillar-score filters still active downstream.
         soft_threshold = max(4, threshold - 3)
         soft_call = (
             call_count >= soft_threshold
-            and (put_count == 0 or call_count >= 3 * put_count)
+            and (put_count == 0 or call_count >= 2 * put_count)
         )
         soft_put = (
             put_count >= soft_threshold
-            and (call_count == 0 or put_count >= 3 * call_count)
+            and (call_count == 0 or put_count >= 2 * call_count)
         )
         soft_fire_used = False  # exposed in evidence_pillars for transparency
 
