@@ -1,4 +1,67 @@
-# TradeSignal AI — 10-Agent Trading Prediction System v6.8
+# TradeSignal AI — 10-Agent Trading Prediction System v6.9
+
+## v6.9 — New alpha sources, agent-diversity bonus, ADX bug fix
+A focused accuracy upgrade on top of v6.8 that adds documented short-horizon
+edges WITHOUT breaking the carefully-tuned 10-agent consensus structure.
+**Files touched:** `indicators.py`, `agents.py`, `meta_learning.py`, `server.py`.
+
+**New alpha-source indicators (`indicators.py`):**
+1. **Gap analysis** (`compute_gap_analysis`). Overnight gap %, classified as
+   gap-and-go (continuation) vs gap-fill (reversal) — a well-documented
+   short-horizon edge. Returns `gap_pct`, `gap_signal` ∈ [-1,+1], and a
+   text `gap_state` (gap_up_holding / gap_down_filled / etc.).
+2. **NR4 / NR7 range compression** (`compute_range_metrics`). Detects bars
+   with the narrowest range of the last 4 / 7 bars — both predict
+   high-probability breakouts on the next bar. Also returns `inside_bar`
+   and a continuous `range_compression` ∈ [0,1] score.
+3. **Volume Profile / Point-of-Control** (`compute_volume_profile`). Computes
+   the price level with the highest accumulated volume in the last 30 bars
+   (a strong magnet/support/resistance). Returns `vp_poc`, normalised
+   `vp_position` ∈ [-1,+1], and `vp_above_poc` flag.
+4. **Hurst exponent** (`compute_hurst`). R/S analysis of log returns over
+   the last 64 bars, returning H ∈ [0,1] and a `regime_kind` label
+   (`trending` / `mean_reverting` / `neutral`). Lets the system distinguish
+   reliable trend setups from coin-flip chop.
+
+**JudgeAgent / target-hit alignment upgrades (`agents.py`):**
+- `compute_target_hit_probability` now scores 4 NEW alignment items on top
+  of the existing 15: Volume Profile (POC), Gap Analysis, Hurst Regime,
+  and Range Compression (NR4/NR7 + 5-day prior slope direction).
+  Live `/api/analyze/NVDA` now returns 19 alignment items vs 15 pre-v6.9.
+- **Agent-diversity bonus** (Judge `decide()`, line ~2340). 6 trend agents
+  agreeing is a far weaker signal than 6 *different kinds* of agents
+  (trend + flow + sentiment + ml + risk) all converging. Each agent is
+  classified into a category {trend, flow, sentiment, meanrev, ml} and
+  the final confidence is multiplied based on how many distinct categories
+  agree (1 cat → −6%, 3 → +5%, 5 → +12%). Penalises further when the
+  opposing side is more diverse than ours. Reported in
+  `evidence_pillars.agent_diversity` for transparency.
+
+**ML Agent improvements (`agents.py`):**
+- **Feature vector grew 12 → 15:** added `gap_signal`, `vp_position`, and
+  `range_compression` (compression × tanh(prior 5d slope), only when an
+  NR4/NR7 setup is active). Default weights: 0.50 / 0.35 / 0.45.
+- **ADX-inversion bug FIXED.** Pre-v6.9, the `adx_directional` feature
+  used `tanh((adx-20)/15) × dir_sign`, so when ADX < 20 the strength was
+  negative and the multiplication INVERTED the directional vote (a weak
+  uptrend was effectively recorded as a strong downtrend signal in the
+  log-reg). Now uses `tanh(max(0, adx-20)/15)` so weak trends contribute
+  zero instead of a backwards sign.
+
+**Snapshot persistence (`meta_learning.py`):**
+- `SNAPSHOT_FEATURES` extended with the 13 new fields so resolved
+  predictions store the v6.9 indicator state and `train_from_resolved()`
+  can rebuild the same 15-feature vector for online learning.
+
+**Verification (live):**
+- `/api/health` reports `agents=11` (10 + Judge), `version=6.9-alpha-sources-and-diversity`.
+- `/api/analyze/NVDA?horizon=swing`: BUY_CALL @ 55%, hurst=0.69 (trending),
+  NR4=NR7=true (compressed range), vp_position=+1.0 (price above POC),
+  diversity 4/5 categories agreed → +9% boost.
+- `/api/analyze/META?horizon=swing`: BUY_CALL @ 89%, all 4 new alignment
+  items active in `target_hit_breakdown`.
+- All four horizons (intraday/day/swing/position) still resolve cleanly,
+  no traceback in logs.
 
 ## v6.8 — Weight-aware Judge + ML-disagreement penalty + bug sweep
 A focused accuracy + correctness pass on top of v6.7. **Files touched:**

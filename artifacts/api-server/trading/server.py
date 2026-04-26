@@ -1,5 +1,5 @@
 """
-TradeSignal AI — FastAPI backend v6.7
+TradeSignal AI — FastAPI backend v6.9
 10 Agents: PriceAction, Technical, Volume, Sentiment, OptionsFlow, Momentum,
           Risk, FearGreed, Political, ML  +  Judge (fires at 6/10 consensus)
 Endpoints: /api/fear-greed  /api/political-news  /api/accuracy
@@ -59,7 +59,7 @@ AGENTS = [
     PriceActionAgent(), TechnicalAgent(), VolumeAgent(),
     SentimentAgent(), OptionsFlowAgent(), MomentumAgent(),
     RiskAgent(), FearGreedAgent(), PoliticalAgent(),
-    MLAgent(),  # v6.7 — online-learning logistic-regression on 12 indicators
+    MLAgent(),  # v6.9 — online-learning logistic-regression on 15 indicators (gap/POC/NR4-7 added)
 ]
 JUDGE = JudgeAgent()
 
@@ -756,7 +756,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "6.8-weight-aware-judge"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "6.9-alpha-sources-and-diversity"}
 
 
 @app.get("/api/ml-stats")

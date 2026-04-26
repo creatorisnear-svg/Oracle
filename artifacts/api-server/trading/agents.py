@@ -1313,6 +1313,14 @@ ML_FEATURES_DEFAULT: dict[str, float] = {
     "williams_r":        0.30,
     # Chaikin Money Flow > 0 = institutional accumulation = bullish.
     "cmf":               0.40,
+    # ── v6.9 — new alpha-source features ──────────────────────────
+    # Overnight gap-and-go bias. Feature in [-1, +1] from gap_signal.
+    "gap_signal":        0.50,
+    # Volume Point-of-Control acceptance. Above POC = bullish.
+    "vp_position":       0.35,
+    # NR4/NR7 range compression × prior 5-day slope sign — predicts
+    # breakout direction. Feature is compression × tanh(5d_slope).
+    "range_compression": 0.45,
 }
 
 
@@ -1322,13 +1330,14 @@ def _ml_pretty(k: str) -> str:
         "adx_directional": "ADX", "supertrend_dir": "ST", "ichimoku_signal": "Ichi",
         "cs_pattern": "Patterns", "bb_position": "BB", "vwap_distance": "VWAP",
         "trend_score": "Trend", "williams_r": "W%R", "cmf": "CMF",
+        "gap_signal": "Gap", "vp_position": "POC", "range_compression": "NRn",
     }.get(k, k)
 
 
 class MLAgent:
     name = "ML Agent"
     emoji = "🤖"
-    method = "Logistic regression on 12 indicators (online learning from resolved predictions)"
+    method = "Logistic regression on 15 indicators (online learning from resolved predictions)"
 
     # Class-level cache so we don't re-read ml_weights.json on every call.
     _weights_cache: dict | None = None
@@ -1399,12 +1408,26 @@ class MLAgent:
             wr = float(ind.get("williams_r") or -50)
             cmf = float(ind.get("cmf") or 0)
             bb_half = max((bb_u - bb_l) / 2.0, 1e-6)
+            # v6.9: new alpha-source features
+            gap_sig = float(ind.get("gap_signal") or 0.0)
+            vp_pos = float(ind.get("vp_position") or 0.0)
+            comp = float(ind.get("range_compression") or 0.0)
+            ch5 = float(ind.get("change_5d") or 0.0)
+            # range-compression × prior 5d slope sign — predicts breakout
+            # direction. Only meaningful when an NR4/NR7 setup is present.
+            nr_active = bool(ind.get("nr4")) or bool(ind.get("nr7"))
+            range_feat = (comp * math.tanh(ch5 / 3.0)) if nr_active else 0.0
+            # ADX directional fix (v6.9): clamp the (adx-20) at 0 BEFORE
+            # multiplying by direction so weak trends contribute zero
+            # instead of inverting the sign (was a real bug pre-v6.9).
+            adx_strength = math.tanh(max(0.0, adx - 20.0) / 15.0)
+            adx_dir = 1.0 if plus_di > minus_di else (-1.0 if plus_di < minus_di else 0.0)
             return {
                 "_bias":            1.0,
                 "rsi_signal":       (50.0 - rsi) / 30.0,
                 "macd_hist":        math.tanh(macd_h / atr),
                 "macd_cross":       (1.0 if macd_up else 0.0) - (1.0 if macd_dn else 0.0),
-                "adx_directional":  math.tanh((adx - 20.0) / 15.0) * (1.0 if plus_di > minus_di else -1.0),
+                "adx_directional":  adx_strength * adx_dir,
                 "supertrend_dir":   1.0 if st_dir == "up" else (-1.0 if st_dir == "down" else 0.0),
                 "ichimoku_signal":  1.0 if ich_sig == "bullish" else (-1.0 if ich_sig == "bearish" else 0.0),
                 "cs_pattern":       math.tanh(cs_score / 1.5),
@@ -1413,6 +1436,10 @@ class MLAgent:
                 "trend_score":      max(-1.0, min(1.0, trend_s)),
                 "williams_r":       (-50.0 - wr) / 30.0,
                 "cmf":              math.tanh(cmf * 10.0),
+                # v6.9
+                "gap_signal":       max(-1.0, min(1.0, gap_sig)),
+                "vp_position":      max(-1.0, min(1.0, vp_pos)),
+                "range_compression": max(-1.0, min(1.0, range_feat)),
             }
         except Exception:
             return {k: 0.0 for k in ML_FEATURES_DEFAULT}
@@ -1721,6 +1748,45 @@ def compute_target_hit_probability(
     _add("Candlestick Patterns", 1.2,
          cs_score >= 0.5, cs_score <= -0.5,
          f"{cs_last} (score {cs_score:+.2f})")
+
+    # ── v6.9 alpha sources ────────────────────────────────────────
+    # Volume Point-of-Control: institutional acceptance level. Price
+    # above POC = bulls in control of the recent profile; below = bears.
+    vp_pos = float(ind.get("vp_position") or 0.0)
+    vp_above = bool(ind.get("vp_above_poc"))
+    _add("Volume Profile (POC)", 1.0,
+         vp_above and vp_pos > 0.15,
+         (not vp_above) and vp_pos < -0.15,
+         f"{'above' if vp_above else 'below'} POC ({vp_pos:+.2f})")
+
+    # Overnight gap analysis — gap-and-go vs gap-fill is a documented edge.
+    gap_sig = float(ind.get("gap_signal") or 0.0)
+    gap_state = str(ind.get("gap_state") or "none")
+    _add("Gap Analysis", 0.9,
+         gap_sig >= 0.3, gap_sig <= -0.3,
+         f"{gap_state} (sig {gap_sig:+.2f})")
+
+    # Hurst regime: in trending markets (H>0.55) trend signals are more
+    # reliable; in mean-reverting (H<0.45) they're a coin-flip. Score the
+    # regime itself as a modifier on whether the directional bet "should"
+    # work — trending = aligned with trade, mean-rev = against.
+    hurst = float(ind.get("hurst") or 0.5)
+    regime_kind = str(ind.get("regime_kind") or "neutral")
+    # Trend regime helps a directional bet; mean-reverting hurts one.
+    _add("Hurst Regime", 0.7,
+         regime_kind == "trending",
+         regime_kind == "mean_reverting",
+         f"H={hurst:.2f} ({regime_kind})")
+
+    # NR4/NR7 range compression — predicts breakout direction = trade
+    # direction (volatility expansion typically continues the prior move).
+    if bool(ind.get("nr7")) or bool(ind.get("nr4")):
+        # Prior 5-bar slope tells us which way the breakout is leaning
+        prior_slope = float(ind.get("change_5d") or 0.0)
+        nr_label = "NR7" if ind.get("nr7") else "NR4"
+        _add("Range Compression", 0.8,
+             prior_slope > 0.5, prior_slope < -0.5,
+             f"{nr_label} setup (5d {prior_slope:+.1f}%)")
 
     alignment = (total_signed / total_weight) if total_weight > 0 else 0.0
     alignment = max(-1.0, min(1.0, alignment))
@@ -2267,6 +2333,53 @@ class JudgeAgent:
                 conf += abs(disc_boost)
             elif disc_lean == "BUY_CALL":
                 conf -= abs(disc_boost) * 0.6
+
+        # ── Agent-diversity bonus (v6.9) ────────────────────────────
+        # 6 trend agents agreeing is a much weaker signal than 6 different
+        # KINDS of agents (trend + flow + sentiment + ml + risk) all
+        # converging. Reward genuinely diverse consensus, fade narrow ones.
+        # Categorisation reflects each agent's PRIMARY analytical lens:
+        #   trend     — multi-tf trend, price action, momentum
+        #   meanrev   — risk gauge (overextension), price-action exhaustion
+        #   flow      — volume, options flow
+        #   sentiment — news sentiment, fear/greed, political
+        #   ml        — pure online-learned logistic regression
+        if signal != "HOLD":
+            AGENT_CATEGORY = {
+                "Price Action Agent": "trend",
+                "Technical Agent": "trend",
+                "Momentum Agent": "trend",
+                "Volume Agent": "flow",
+                "Options Flow Agent": "flow",
+                "Sentiment Agent": "sentiment",
+                "Fear & Greed Agent": "sentiment",
+                "Political Agent": "sentiment",
+                "Risk Agent": "meanrev",
+                "ML Agent": "ml",
+            }
+            cats_agree = {AGENT_CATEGORY.get(v["agent"], "other")
+                          for v in votes if v["vote"] == signal}
+            cats_disagree = {AGENT_CATEGORY.get(v["agent"], "other")
+                             for v in votes
+                             if v["vote"] != signal and v["vote"] != "HOLD"}
+            n_diverse = len(cats_agree)
+            # 1 category agreeing → −6%   (narrow consensus, suspicious)
+            # 2 categories       →  0%   (neutral)
+            # 3 categories       → +5%   (broad)
+            # 4 categories       → +9%   (very broad)
+            # 5 categories       → +12%  (every analytical lens aligned)
+            diversity_pct = {1: -6.0, 2: 0.0, 3: 5.0, 4: 9.0, 5: 12.0}.get(n_diverse, 0.0)
+            # Penalise when the OPPOSING side is more diverse than ours —
+            # means more "kinds" of evidence point against us.
+            if len(cats_disagree) > n_diverse and n_diverse < 4:
+                diversity_pct -= 3.0
+            conf *= (1.0 + diversity_pct / 100.0)
+            evidence_pillars = evidence_pillars or {}
+            evidence_pillars["agent_diversity"] = {
+                "categories_agreed": sorted(cats_agree),
+                "categories_against": sorted(cats_disagree),
+                "score_pct": round(diversity_pct, 1),
+            }
 
         conf = max(40.0, min(95.0, conf))
 

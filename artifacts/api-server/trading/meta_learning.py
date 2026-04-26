@@ -120,6 +120,11 @@ SNAPSHOT_FEATURES = [
     "price", "atr14", "macd_cross_up", "macd_cross_dn",
     "plus_di", "minus_di", "bb_upper", "bb_lower", "bb_mid",
     "price_vs_vwap_pct", "trend_score", "cs_pattern_score",
+    # v6.9 — new alpha-source features (gap, NR4/NR7, volume profile, Hurst)
+    "gap_pct", "gap_signal", "gap_state",
+    "nr4", "nr7", "range_compression", "inside_bar", "change_5d",
+    "vp_poc", "vp_position", "vp_above_poc",
+    "hurst", "regime_kind",
 ]
 
 

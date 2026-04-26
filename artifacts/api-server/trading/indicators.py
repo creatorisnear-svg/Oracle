@@ -871,7 +871,210 @@ def detect_candlestick_patterns(opens, highs, lows, closes, lookback=30):
     }
 
 
-# ─── NEW: Monte Carlo target-hit probability (simple GBM) ─────────────────────
+# ── v6.9 — NEW ALPHA-SOURCE INDICATORS ──────────────────────────────────────
+def compute_gap_analysis(opens, highs, lows, closes):
+    """
+    Overnight-gap analysis. Gap-and-go (open jumps in one direction and
+    keeps going) vs gap-fill (price reverses to close the gap) is one of
+    the best-documented short-horizon edges.
+
+    Returns dict with:
+      gap_pct       — today's open vs prior close, %
+      gap_signal    — float in [-1, +1] where +1 = strong bullish gap-and-go,
+                       -1 = strong bearish gap-and-go, 0 = no meaningful gap
+      gap_state     — text label: "gap_up_filled" | "gap_up_holding" |
+                       "gap_down_filled" | "gap_down_holding" | "none"
+    """
+    n = len(closes)
+    if n < 2:
+        return {"gap_pct": 0.0, "gap_signal": 0.0, "gap_state": "none"}
+    prev_close = float(closes[-2])
+    today_open = float(opens[-1])
+    today_hi = float(highs[-1])
+    today_lo = float(lows[-1])
+    today_close = float(closes[-1])
+    if prev_close <= 0:
+        return {"gap_pct": 0.0, "gap_signal": 0.0, "gap_state": "none"}
+
+    gap_pct = (today_open - prev_close) / prev_close * 100.0
+
+    # Threshold of 0.3% — below this it's just noise, not a real gap
+    if abs(gap_pct) < 0.3:
+        return {"gap_pct": round(gap_pct, 3), "gap_signal": 0.0, "gap_state": "none"}
+
+    if gap_pct > 0:
+        # Bullish gap. Did it fill (price came back to prev_close)?
+        filled = today_lo <= prev_close
+        # Holding above the open = bulls in control = continuation likely
+        holding_strong = today_close >= today_open
+        if filled:
+            # Reversal — bearish bias
+            sig = -min(1.0, abs(gap_pct) / 2.0)
+            state = "gap_up_filled"
+        else:
+            # Gap-and-go up
+            sig = min(1.0, abs(gap_pct) / 2.0) * (1.0 if holding_strong else 0.5)
+            state = "gap_up_holding"
+    else:
+        filled = today_hi >= prev_close
+        holding_strong = today_close <= today_open
+        if filled:
+            sig = min(1.0, abs(gap_pct) / 2.0)  # bullish reversal
+            state = "gap_down_filled"
+        else:
+            sig = -min(1.0, abs(gap_pct) / 2.0) * (1.0 if holding_strong else 0.5)
+            state = "gap_down_holding"
+    return {
+        "gap_pct": round(gap_pct, 3),
+        "gap_signal": round(sig, 3),
+        "gap_state": state,
+    }
+
+
+def compute_range_metrics(highs, lows, closes, lookback=20):
+    """
+    NR4 / NR7 detector + range-compression score.
+
+    NR4 = current bar has the narrowest range of the last 4 bars.
+    NR7 = narrowest of the last 7 bars.
+    Both predict high-probability breakouts on the NEXT bar.
+
+    range_compression ∈ [0, 1] measures how compressed the current range
+    is vs the lookback average — 1.0 means today's range is essentially
+    flat vs typical, 0.0 means today is a normal-or-larger range bar.
+    """
+    n = len(closes)
+    if n < max(lookback, 8):
+        return {"nr4": False, "nr7": False, "range_compression": 0.0,
+                "inside_bar": False}
+    ranges = [float(highs[i]) - float(lows[i]) for i in range(n)]
+    today = ranges[-1]
+    nr4 = today <= min(ranges[-4:])
+    nr7 = today <= min(ranges[-7:])
+    # Inside bar — today's high ≤ yesterday's high AND today's low ≥ yesterday's low.
+    inside = (float(highs[-1]) <= float(highs[-2])
+              and float(lows[-1]) >= float(lows[-2]))
+    avg_range = float(np.mean(ranges[-lookback:])) if ranges else 0.0
+    if avg_range <= 0:
+        comp = 0.0
+    else:
+        # Compression = how much SMALLER today is vs average; clipped 0..1
+        comp = max(0.0, min(1.0, 1.0 - (today / avg_range)))
+    return {
+        "nr4": bool(nr4),
+        "nr7": bool(nr7),
+        "range_compression": round(comp, 3),
+        "inside_bar": bool(inside),
+    }
+
+
+def compute_volume_profile(highs, lows, closes, volumes, lookback=30, bins=20):
+    """
+    Volume-by-price profile. Returns the Point of Control (POC) — the price
+    level with the most traded volume in the lookback window. Acts as a
+    strong magnet / support / resistance.
+
+    Returns:
+      vp_poc        — POC price
+      vp_position   — float in [-1, +1] showing how far current price is
+                       from POC, normalised by the profile's price range
+                       (-1 = far below POC, +1 = far above)
+      vp_above_poc  — bool, True if last close > POC
+    """
+    n = len(closes)
+    last = float(closes[-1])
+    if n < 10:
+        return {"vp_poc": last, "vp_position": 0.0, "vp_above_poc": False}
+    seg = slice(max(0, n - lookback), n)
+    h_seg = np.asarray(highs[seg], dtype=float)
+    l_seg = np.asarray(lows[seg], dtype=float)
+    v_seg = np.asarray(volumes[seg], dtype=float)
+    p_lo = float(np.min(l_seg))
+    p_hi = float(np.max(h_seg))
+    if p_hi <= p_lo or v_seg.sum() <= 0:
+        return {"vp_poc": last, "vp_position": 0.0, "vp_above_poc": last > last}
+    edges = np.linspace(p_lo, p_hi, bins + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    vol_at = np.zeros(bins)
+    for i in range(len(h_seg)):
+        # Spread the bar's volume evenly across the bins it touches —
+        # standard "TPO-light" approximation for daily bars.
+        bar_lo, bar_hi, bar_v = float(l_seg[i]), float(h_seg[i]), float(v_seg[i])
+        if bar_hi <= bar_lo or bar_v <= 0:
+            continue
+        # Find which bins this bar's range overlaps
+        j_lo = int(np.clip(np.searchsorted(edges, bar_lo) - 1, 0, bins - 1))
+        j_hi = int(np.clip(np.searchsorted(edges, bar_hi) - 1, 0, bins - 1))
+        n_bins = max(1, j_hi - j_lo + 1)
+        vol_at[j_lo:j_hi + 1] += bar_v / n_bins
+    poc = float(centers[int(np.argmax(vol_at))])
+    half_range = max((p_hi - p_lo) / 2.0, 1e-9)
+    pos = (last - poc) / half_range
+    pos = max(-1.0, min(1.0, pos))
+    return {
+        "vp_poc": round(poc, 4),
+        "vp_position": round(pos, 3),
+        "vp_above_poc": bool(last > poc),
+    }
+
+
+def compute_hurst(closes, lookback=64):
+    """
+    Hurst exponent via R/S analysis on log returns.
+
+    H ≈ 0.5  → random walk (efficient market, no edge)
+    H > 0.55 → trending / persistent (trend-following works)
+    H < 0.45 → mean-reverting / anti-persistent (fade extremes)
+
+    Also returns a discrete `regime_kind` label so the JudgeAgent and ML
+    feature extractor can treat trend vs chop differently.
+    """
+    n = len(closes)
+    if n < lookback + 2:
+        return {"hurst": 0.5, "regime_kind": "neutral"}
+    arr = np.asarray(closes[-(lookback + 1):], dtype=float)
+    rets = np.diff(np.log(arr + 1e-9))
+    if len(rets) < 16:
+        return {"hurst": 0.5, "regime_kind": "neutral"}
+    # R/S over multiple sub-window sizes
+    sizes = [s for s in (8, 16, 32, lookback // 2, lookback) if s <= len(rets)]
+    sizes = sorted(set(sizes))
+    if len(sizes) < 2:
+        return {"hurst": 0.5, "regime_kind": "neutral"}
+    rs_vals = []
+    for s in sizes:
+        chunks = len(rets) // s
+        if chunks < 1:
+            continue
+        rs_chunk = []
+        for k in range(chunks):
+            seg = rets[k * s:(k + 1) * s]
+            mu = float(np.mean(seg))
+            cum = np.cumsum(seg - mu)
+            R = float(np.max(cum) - np.min(cum))
+            S = float(np.std(seg))
+            if S > 1e-12 and R > 0:
+                rs_chunk.append(R / S)
+        if rs_chunk:
+            rs_vals.append((s, float(np.mean(rs_chunk))))
+    if len(rs_vals) < 2:
+        return {"hurst": 0.5, "regime_kind": "neutral"}
+    xs = np.log([s for s, _ in rs_vals])
+    ys = np.log([r for _, r in rs_vals])
+    try:
+        h = float(np.polyfit(xs, ys, 1)[0])
+    except Exception:
+        h = 0.5
+    h = max(0.0, min(1.0, h))
+    if h >= 0.55:
+        kind = "trending"
+    elif h <= 0.45:
+        kind = "mean_reverting"
+    else:
+        kind = "neutral"
+    return {"hurst": round(h, 3), "regime_kind": kind}
+
+
 def monte_carlo_target_prob(price, target, vol_pct, days=7, n_sims=2000):
     """Probability of price touching `target` within `days` trading days using GBM."""
     if price <= 0 or vol_pct <= 0 or days <= 0:
@@ -938,6 +1141,11 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
     # Used by JudgeAgent's target-hit alignment AND surfaced on the chart so
     # the user can see which bars triggered each pattern.
     cs_patterns = detect_candlestick_patterns(opens, highs, lows, closes)
+    # v6.9 alpha sources
+    gap_info = compute_gap_analysis(opens, highs, lows, closes)
+    range_info = compute_range_metrics(highs, lows, closes)
+    vp_info = compute_volume_profile(highs, lows, closes, volumes)
+    hurst_info = compute_hurst(closes)
 
     # Volume stats
     avg_vol_20 = np.mean(volumes[-20:]) if n >= 20 else np.mean(volumes) if n > 0 else 1
@@ -1076,6 +1284,19 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "cs_pattern_score": cs_patterns.get("score", 0.0),
         "cs_pattern_last": cs_patterns.get("last", "none"),
         "cs_pattern_dir": cs_patterns.get("last_dir", "none"),
+        # ── v6.9 alpha sources ─────────────────────────────────────
+        "gap_pct": gap_info.get("gap_pct", 0.0),
+        "gap_signal": gap_info.get("gap_signal", 0.0),
+        "gap_state": gap_info.get("gap_state", "none"),
+        "nr4": range_info.get("nr4", False),
+        "nr7": range_info.get("nr7", False),
+        "range_compression": range_info.get("range_compression", 0.0),
+        "inside_bar": range_info.get("inside_bar", False),
+        "vp_poc": vp_info.get("vp_poc", price),
+        "vp_position": vp_info.get("vp_position", 0.0),
+        "vp_above_poc": vp_info.get("vp_above_poc", False),
+        "hurst": hurst_info.get("hurst", 0.5),
+        "regime_kind": hurst_info.get("regime_kind", "neutral"),
     }
 
 
