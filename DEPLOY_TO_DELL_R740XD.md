@@ -585,10 +585,24 @@ RUN pip install --no-cache-dir psycopg2-binary
 COPY . .
 
 ENV PORT=8080
+# Cap NumPy / pandas internal threading. Each agent already runs in its own
+# Python thread; without these caps each call grabs all 112 hardware threads
+# and you get lock contention with no real win.
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
+ENV OPENBLAS_NUM_THREADS=4
 EXPOSE 8080
 
-CMD ["python3", "server.py"]
+# 4 uvicorn workers = 4× concurrent /api/analyze capacity at ~3 GB total
+# memory (nothing on a 512 GB box). Bump up if the API ever queues requests.
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "4"]
 ```
+
+**Note about WebSocket broadcasts with `--workers > 1`:** each uvicorn worker
+has its own in-process `_WS_CLIENTS` dict, so a client connected to worker A
+won't receive a broadcast emitted from worker B. The current dashboard
+pattern (one user watches one symbol) is unaffected. If you later add
+"push to all clients" features (alerts, fan-out), introduce Redis pub/sub.
 
 If `requirements.txt` doesn't exist yet, generate it on your laptop:
 
@@ -599,21 +613,23 @@ pip freeze > requirements.txt
 # Then push to the server (rsync command from section 6)
 ```
 
-Or generate it inline if needed:
+Or generate it inline if needed (current v7.1.2 — includes pytrends for the
+GoogleTrendsAgent and the numpy/pandas major-version pins from `pyproject.toml`):
 
 ```bash
 cat > requirements.txt <<'EOF'
-fastapi
-uvicorn[standard]
-yfinance
-pandas
-numpy
-scipy
-scikit-learn
-beautifulsoup4
-requests
-feedparser
-python-dateutil
+fastapi>=0.136.1
+uvicorn[standard]>=0.46.0
+httpx>=0.28.1
+websockets>=16.0
+yfinance>=1.3.0
+pandas>=3.0.2
+numpy>=2.4.4
+scipy>=1.17.1
+ta>=0.11.0
+pytrends>=4.9.2
+requests>=2.33.1
+psycopg2-binary>=2.9
 EOF
 ```
 
