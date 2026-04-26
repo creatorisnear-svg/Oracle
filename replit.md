@@ -1,4 +1,49 @@
-# TradeSignal AI — 12-Agent Trading Prediction System v7.0
+# TradeSignal AI — 12-Agent Trading Prediction System v7.0.1
+
+## v7.0.1 — Bug fixes (ML feature ordering, SectorRS daily history) + regime-stress dampener
+A surgical follow-up to v7.0 that fixes two real bugs found in audit and adds
+one new accuracy lever — a Hurst/VIX-aware "regime stress" confidence
+dampener.
+**Files touched:** `agents.py`, `server.py`, `indicators.py`, `learning.py`.
+
+**Bug 1 — MLAgent ran BEFORE SectorRS, always saw rs_score=0:**
+- v7.0 registered the agents in this order:
+  `[..., MLAgent (10), SectorRS (11), MarketRegime (12)]`. But `run_agents_sync`
+  calls `agent.analyze()` sequentially, and only AFTER each call does it lift
+  the SectorRS extras (`rs_score`, `rs_5d`, etc.) back into `ind`. So the
+  MLAgent's feature extractor read `ind.get("rs_score") = None` every single
+  time — the new RS feature was effectively dead code.
+- **Fix:** Reordered to `[..., SectorRS (10), MarketRegime (11), MLAgent (12)]`
+  so MLAgent always sees fully-enriched indicators. Verified live: META
+  swing now reports `rs_score=+7.455` AND `MLAgent confidence=79.3` in the
+  same response.
+
+**Bug 2 — SectorRS computed "5-day return" from intraday bars:**
+- The `df` passed to `agent.analyze()` is whatever timeframe the requested
+  horizon uses — 5-min bars for intraday, 15-min for day, etc. SectorRS used
+  `closes[-6]` for the 5-day return, which on intraday horizons was actually
+  6 BARS ago (≈30 minutes), not 5 days. The result was a meaningless
+  intraday vs daily-ETF comparison for short-horizon analyses.
+- **Fix:** New `_daily_returns(ticker)` method that ALWAYS pulls daily bars
+  from yfinance (cached 10 min) for both legs of the comparison, regardless
+  of the live `df` interval. Same code path is now used for stock and ETF.
+  Also returns an `ok` flag so we cleanly HOLD on fetch failure instead of
+  silently feeding a 0% return into the rs_score formula.
+
+**New — Regime-stress confidence dampener (`JudgeAgent.decide`):**
+- Layered on top of the v7.0 agent-diversity bonus, applied just before the
+  final `conf` clamp. Dampens (never boosts) the final confidence when:
+  - Hurst < 0.45 OR `regime_kind == "mean_reverting"` → −5% (chop)
+  - VIX 25-30 → −4% (stress)
+  - VIX ≥ 30 → −8% (panic) — additive with chop penalty
+- Reported as a new `evidence_pillars.regime_stress` block (with hurst,
+  vix, score_pct, reasons) so the dashboard can surface the rationale.
+- Why it helps: in chop or panic, even a wide consensus has a much higher
+  false-signal rate. Symmetric dampening avoids over-confident trades
+  exactly when the market is least predictable.
+
+**Cosmetic cleanups:** updated stale "10 agents" / "6/10 consensus" strings in
+`learning.py` docstring and `indicators.py` entry-trigger fallback message.
 
 ## v7.0 — Sector Relative-Strength + Macro Regime agents, Anchored VWAP, threshold rebalance
 A targeted accuracy upgrade aimed at +5–10% prediction lift, on top of v6.9.

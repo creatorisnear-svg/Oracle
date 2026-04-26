@@ -2,7 +2,7 @@
 Agent Learning System v5
 Per-agent accuracy tracking with CALL/PUT breakdown.
 Weights auto-adjust via Bayesian smoothing after outcomes are verified.
-10 agents + Judge, SQLite-backed, survives restarts.
+12 agents + Judge, SQLite-backed, survives restarts.
 
 v5 closes the learning loop properly:
   • per-horizon maturity windows (intraday=2h, day=6h, swing=5d, position=14d)

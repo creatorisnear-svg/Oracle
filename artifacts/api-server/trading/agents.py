@@ -1899,26 +1899,28 @@ class SectorRelativeStrengthAgent:
         sector = (info or {}).get("sector") or ""
         return _SECTOR_ETF.get(sector, "SPY")
 
-    def _etf_returns(self, etf: str) -> tuple[float, float]:
-        """Returns (chg5_pct, chg20_pct) for the ETF. Cached 10min."""
-        cached = self._SECTOR_CACHE.get(etf)
+    def _daily_returns(self, ticker: str) -> tuple[float, float, bool]:
+        """Returns (chg5d_pct, chg20d_pct, ok). Always uses DAILY bars so
+        the comparison is apples-to-apples — the live `df` may be intraday
+        for short horizons. Cached 10 min."""
+        cached = self._SECTOR_CACHE.get(ticker)
         if cached and (time.time() - cached[2]) < self._CACHE_TTL:
-            return cached[0], cached[1]
+            return cached[0], cached[1], True
         try:
             import yfinance as yf
-            d = yf.Ticker(etf).history(period="2mo", interval="1d")
+            d = yf.Ticker(ticker).history(period="2mo", interval="1d")
             if d.empty or len(d) < 22:
-                return 0.0, 0.0
+                return 0.0, 0.0, False
             closes = d["Close"].values
             p_now = float(closes[-1])
-            p5 = float(closes[-6]) if len(closes) >= 6 else p_now
-            p20 = float(closes[-21]) if len(closes) >= 21 else p_now
+            p5 = float(closes[-6])
+            p20 = float(closes[-21])
             chg5 = (p_now - p5) / p5 * 100 if p5 > 0 else 0.0
             chg20 = (p_now - p20) / p20 * 100 if p20 > 0 else 0.0
-            self._SECTOR_CACHE[etf] = (chg5, chg20, time.time())
-            return chg5, chg20
+            self._SECTOR_CACHE[ticker] = (chg5, chg20, time.time())
+            return chg5, chg20, True
         except Exception:
-            return 0.0, 0.0
+            return 0.0, 0.0, False
 
     def analyze(self, df, ind):
         try:
@@ -1930,17 +1932,14 @@ class SectorRelativeStrengthAgent:
             if sym == etf:
                 return _hold(self.name, self.emoji, f"{sym} is its own sector benchmark")
 
-            # Stock returns from the price series
-            closes = df["Close"].values.astype(float)
-            if len(closes) < 22:
-                return _hold(self.name, self.emoji, "insufficient history")
-            p_now = float(closes[-1])
-            p5 = float(closes[-6])
-            p20 = float(closes[-21])
-            stock_5 = (p_now - p5) / p5 * 100 if p5 > 0 else 0.0
-            stock_20 = (p_now - p20) / p20 * 100 if p20 > 0 else 0.0
-
-            etf_5, etf_20 = self._etf_returns(etf)
+            # CRITICAL: pull daily bars for BOTH legs. The `df` argument may be
+            # 5-min / 15-min / 1-hr depending on horizon, so closes[-6] there
+            # would NOT be a 5-day return (was a real bug pre-v7.0.1).
+            stock_5, stock_20, stock_ok = self._daily_returns(sym)
+            etf_5, etf_20, etf_ok = self._daily_returns(etf)
+            if not (stock_ok and etf_ok):
+                return _hold(self.name, self.emoji,
+                             f"insufficient daily history for {sym}/{etf}")
             rs5 = stock_5 - etf_5     # outperformance over 5d
             rs20 = stock_20 - etf_20  # outperformance over 20d
             # Weighted blend: 5d gets more weight (acts faster) but 20d
@@ -2630,6 +2629,42 @@ class JudgeAgent:
                 "categories_agreed": sorted(cats_agree),
                 "categories_against": sorted(cats_disagree),
                 "score_pct": round(diversity_pct, 1),
+            }
+
+            # ── v7.0.1 — Regime-stress confidence dampener ───────────────
+            # When the market is choppy (Hurst < 0.45 = mean-reverting) OR
+            # in a panic (VIX > 30), the *same* consensus deserves less
+            # trust because random whips overwhelm the signal. Dampens the
+            # final confidence symmetrically — never boosts. Applied AFTER
+            # diversity so a broad consensus in chop is still better than
+            # a narrow one in chop.
+            stress_pct = 0.0
+            stress_reasons: list[str] = []
+            try:
+                hurst = float(ind.get("hurst") or 0.5)
+            except (TypeError, ValueError):
+                hurst = 0.5
+            regime_kind = str(ind.get("regime_kind") or "").lower()
+            if hurst < 0.45 or regime_kind == "mean_reverting":
+                stress_pct -= 5.0
+                stress_reasons.append(f"chop (H={hurst:.2f})")
+            try:
+                vix_now = float((ind.get("market_regime") or {}).get("vix") or 0.0)
+            except (TypeError, ValueError):
+                vix_now = 0.0
+            if vix_now >= 30.0:
+                stress_pct -= 8.0
+                stress_reasons.append(f"VIX panic ({vix_now:.1f})")
+            elif vix_now >= 25.0:
+                stress_pct -= 4.0
+                stress_reasons.append(f"VIX stress ({vix_now:.1f})")
+            if stress_pct < 0.0:
+                conf *= (1.0 + stress_pct / 100.0)
+            evidence_pillars["regime_stress"] = {
+                "score_pct": round(stress_pct, 1),
+                "reasons": stress_reasons,
+                "hurst": round(hurst, 3),
+                "vix": round(vix_now, 2),
             }
 
         conf = max(40.0, min(95.0, conf))

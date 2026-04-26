@@ -1,8 +1,8 @@
 """
-TradeSignal AI — FastAPI backend v6.9
-10 Agents: PriceAction, Technical, Volume, Sentiment, OptionsFlow, Momentum,
-          Risk, FearGreed, Political, ML, SectorRS, MarketRegime
-          +  Judge (fires at 7/12 consensus)
+TradeSignal AI — FastAPI backend v7.0.1
+12 Agents: PriceAction, Technical, Volume, Sentiment, OptionsFlow, Momentum,
+          Risk, FearGreed, Political, SectorRS, MarketRegime, ML
+          +  Judge (fires at 7/12 consensus, regime-stress aware)
 Endpoints: /api/fear-greed  /api/political-news  /api/accuracy
            /api/accuracy/{symbol}  /api/ml-stats
 """
@@ -61,9 +61,12 @@ AGENTS = [
     PriceActionAgent(), TechnicalAgent(), VolumeAgent(),
     SentimentAgent(), OptionsFlowAgent(), MomentumAgent(),
     RiskAgent(), FearGreedAgent(), PoliticalAgent(),
-    MLAgent(),  # 10 — online-learning logistic-regression on 15 indicators
-    SectorRelativeStrengthAgent(),  # 11 — v7.0 sector rotation edge
-    MarketRegimeAgent(),  # 12 — v7.0 macro filter (VIX/SPY/risk-on)
+    SectorRelativeStrengthAgent(),  # 10 — v7.0 sector rotation edge
+    MarketRegimeAgent(),             # 11 — v7.0 macro filter (VIX/SPY/risk-on)
+    # ML agent runs LAST so it can read rs_score / avwap_signal that earlier
+    # agents (SectorRS, anchored-VWAP wiring) have already written into `ind`.
+    # Pre-v7.0.1 it sat at position 10 and always saw rs_score=0 — bug fixed.
+    MLAgent(),                       # 12 — online-learning logistic-regression on 17 indicators
 ]
 JUDGE = JudgeAgent()
 
@@ -767,7 +770,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.0-sector-rs-and-macro-regime"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.0.1-bugfix-ml-ordering-and-regime-stress"}
 
 
 @app.get("/api/ml-stats")
