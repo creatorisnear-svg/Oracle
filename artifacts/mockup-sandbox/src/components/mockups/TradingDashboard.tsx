@@ -1264,7 +1264,7 @@ export default function TradingDashboard() {
           <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center text-xs font-black">T</div>
           <div>
             <div className="text-sm font-bold leading-tight">TradeSignal AI</div>
-            <div className="text-xs text-slate-500">12-AGENT · CALL/PUT · REAL-TIME</div>
+            <div className="text-xs text-slate-500">30-AGENT · CALL/PUT · REAL-TIME</div>
           </div>
         </div>
         <div ref={searchBoxRef} className="relative">
@@ -1382,7 +1382,7 @@ export default function TradingDashboard() {
         </div>
         {judgment?.horizon && (
           <span className="ml-auto text-[10px] text-slate-500 italic shrink-0">
-            current: {judgment.horizon.label} · need {judgment.horizon.threshold}/12 agents
+            current: {judgment.horizon.label} · need {judgment.horizon.threshold}/30 agents
           </span>
         )}
       </div>
@@ -1438,7 +1438,7 @@ export default function TradingDashboard() {
           {votes.length > 0 && (
             <div className="px-3 py-2 bg-[#0d1524] border-t border-slate-800 shrink-0">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-xs text-slate-500">{votes.length}/12 agents voted</span>
+                <span className="text-xs text-slate-500">{votes.length}/30 agents voted</span>
                 <span className="text-xs text-emerald-400">▲CALL {callPct}%</span>
                 <span className="text-xs text-red-400">▼PUT {putPct}%</span>
               </div>
@@ -1512,8 +1512,8 @@ export default function TradingDashboard() {
                 {!judgment && !analyzing ? (
                   <div className="text-center py-8 space-y-2">
                     <p className="text-slate-400 text-sm">Enter a symbol and click Analyze</p>
-                    <p className="text-slate-500 text-xs">12 agents will vote CALL / PUT / HOLD</p>
-                    <p className="text-slate-600 text-xs">7 of 12 must agree to fire a signal</p>
+                    <p className="text-slate-500 text-xs">30 agents will vote CALL / PUT / HOLD</p>
+                    <p className="text-slate-600 text-xs">14 of 30 must agree to fire a signal (swing)</p>
                   </div>
                 ) : analyzing ? (
                   <div className="text-center py-6 space-y-3">
@@ -1563,9 +1563,9 @@ export default function TradingDashboard() {
                       )}
                     </div>
                     <div className="grid grid-cols-3 gap-2">
-                      <Stat label="CALL" value={`${judgment.vote_tally.BUY_CALL}/12`} color="text-emerald-400" />
-                      <Stat label="PUT" value={`${judgment.vote_tally.BUY_PUT}/12`} color="text-red-400" />
-                      <Stat label="HOLD" value={`${judgment.vote_tally.HOLD}/12`} color="text-slate-400" />
+                      <Stat label="CALL" value={`${judgment.vote_tally.BUY_CALL}/30`} color="text-emerald-400" />
+                      <Stat label="PUT" value={`${judgment.vote_tally.BUY_PUT}/30`} color="text-red-400" />
+                      <Stat label="HOLD" value={`${judgment.vote_tally.HOLD}/30`} color="text-slate-400" />
                     </div>
                     <div className={`rounded-xl border p-3 text-xs space-y-1.5 ${stj.bg} ${stj.border}`}>
                       <div className="flex justify-between"><span className="text-slate-400">Entry</span><span className="font-mono font-bold">${judgment.entry_price.toFixed(2)}</span></div>
