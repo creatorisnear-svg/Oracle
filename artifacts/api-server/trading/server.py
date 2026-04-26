@@ -57,16 +57,46 @@ def _sanitize(obj):
     return obj
 
 
+from agents import (
+    EarningsCalendarAgent, InsiderTradingAgent, ShortInterestAgent,
+    OptionsSkewAgent, MacroEventsAgent, CorrelationAgent,
+    AnalystRatingsAgent, RedditSentimentAgent, GoogleTrendsAgent,
+    YieldCurveAgent, VolumeProfileAgent, MarketInternalsAgent,
+    VolatilityRegimeAgent, MultiTimeframeConfluenceAgent, SeasonalityAgent,
+    DarkPoolAgent, ETFFlowAgent, OrderFlowImbalanceAgent,
+)
+
 AGENTS = [
+    # ── Original 12 (core) ──
     PriceActionAgent(), TechnicalAgent(), VolumeAgent(),
     SentimentAgent(), OptionsFlowAgent(), MomentumAgent(),
     RiskAgent(), FearGreedAgent(), PoliticalAgent(),
-    SectorRelativeStrengthAgent(),  # 10 — v7.0 sector rotation edge
+    SectorRelativeStrengthAgent(),   # 10 — v7.0 sector rotation edge
     MarketRegimeAgent(),             # 11 — v7.0 macro filter (VIX/SPY/risk-on)
-    # ML agent runs LAST so it can read rs_score / avwap_signal that earlier
-    # agents (SectorRS, anchored-VWAP wiring) have already written into `ind`.
-    # Pre-v7.0.1 it sat at position 10 and always saw rs_score=0 — bug fixed.
-    MLAgent(),                       # 12 — online-learning logistic-regression on 17 indicators
+    # ── Tier 1 — free public data (#13–22) ──
+    EarningsCalendarAgent(),         # 13
+    InsiderTradingAgent(),           # 14
+    ShortInterestAgent(),            # 15
+    OptionsSkewAgent(),              # 16
+    MacroEventsAgent(),              # 17
+    CorrelationAgent(),              # 18
+    AnalystRatingsAgent(),           # 19
+    RedditSentimentAgent(),          # 20
+    GoogleTrendsAgent(),             # 21
+    YieldCurveAgent(),               # 22
+    # ── Tier 2 — computed from existing data (#23–27) ──
+    VolumeProfileAgent(),            # 23
+    MarketInternalsAgent(),          # 24
+    VolatilityRegimeAgent(),         # 25
+    MultiTimeframeConfluenceAgent(), # 26
+    SeasonalityAgent(),              # 27
+    # ── Tier 3 — proxy-based pending real feeds (#28–30) ──
+    DarkPoolAgent(),                 # 28
+    ETFFlowAgent(),                  # 29
+    OrderFlowImbalanceAgent(),       # 30
+    # ML agent runs LAST so it can read rs_score / avwap_signal and any new
+    # Tier-1/2 indicators that earlier agents have written into `ind`.
+    MLAgent(),                       # 31 — online-learning logistic regression on 17 indicators
 ]
 JUDGE = JudgeAgent()
 
@@ -770,7 +800,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.0.2-soft-consensus-tier-and-roc10-fix"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.1.0-30-agent-expansion"}
 
 
 @app.get("/api/ml-stats")

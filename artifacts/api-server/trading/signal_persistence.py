@@ -37,7 +37,7 @@ from learning import DB_PATH, HORIZON_WINDOW_HOURS, _parse_iso
 # Bumped 6→7 with the v6.7 addition of MLAgent (10th agent) so the
 # "STRONG" reversal bar stays meaningfully above the firing threshold
 # of 7/12 (~58%). 8/12 ≈ 67% — true majority disagreement before a flip (v7.0).
-STRONG_REVERSAL_VOTES = 8
+STRONG_REVERSAL_VOTES = 17  # v7.1: scaled from 8/12 → 17/30 (~57%) for the 30-agent committee
 
 
 def get_active_trade(symbol: str, horizon: str) -> Optional[dict]:

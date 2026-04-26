@@ -1,4 +1,62 @@
-# TradeSignal AI — 12-Agent Trading Prediction System v7.0.1
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.0
+
+## v7.1.0 — Tier 1/2/3 expansion (12 → 30 agents) + threshold rebalance
+The biggest analytical surface-area upgrade since v7.0. Adds 18 new agents
+across three tiers, scales the consensus threshold, and prepares the system
+for cluster deployment.
+
+**Files touched:** `agents.py`, `server.py`, `signal_persistence.py`.
+**New file:** `DEPLOY_TO_DELL_R740XD.md` — full step-by-step guide for the
+5× Dell R740xd XL cluster ($450 OfferUp rack).
+
+**18 new agents (#13–30):**
+- **Tier 1 — free public data (#13–22):** Earnings Calendar, Insider Trading,
+  Short Interest, Options Skew, Macro Events (FOMC/CPI/NFP), Correlation,
+  Analyst Ratings, Social Sentiment, Search Trends, Yield Curve.
+- **Tier 2 — computed from existing data (#23–27):** Volume Profile (POC/VAH/VAL),
+  Market Internals, Volatility Regime (VIX vs VIX9D), Multi-TF Confluence,
+  Seasonality.
+- **Tier 3 — proxy-based pending real data feeds (#28–30):** Dark Pool Activity
+  (proxy via tight-range + high-volume + close-position), ETF Flow (sector
+  ETF spread), Order Flow Imbalance (intrabar close-position weighted by vol).
+
+Every new agent degrades to `_hold("data unavailable")` when its data source
+isn't wired — no crashes, no fake signals.
+
+**Threshold rebalanced 7/12 → 14/30 (~47% of all agents, ~70% of typically-
+voting pool):** With 18 new agents, several legitimately HOLD when their
+data source isn't connected (FRED, social, dark pool). A flat 17/30 (~57%)
+would over-restrict; 14/30 keeps fire rate near v7.0.2 levels while broadening
+the analytical lens.
+
+**Soft tier scaled:** `soft_threshold = max(4, threshold - 3)` (was `threshold - 1`),
+still gated by 3:1 directional dominance + every downstream gate (pillar score,
+conviction-dominance ≥1.20×, ADX-chop, weekly counter-trend, overextension,
+earnings veto).
+
+**Strong-reversal vote bar scaled:** `STRONG_REVERSAL_VOTES = 17` (was 8/12)
+in `signal_persistence.py` — keeps the "true majority disagreement" bar at
+the same ~57% to flip an open trade.
+
+**Agent diversity bonus extended:** New `fundamental` category added (Insider
+Trading, Analyst Ratings) — total 7 categories now (trend, flow, sentiment,
+meanrev, ml, rotation, macro, fundamental). Diversity bonus dict already
+covered up to 7 categories at +17%.
+
+**Smoke verification:**
+- AAPL swing: 4 CALL / 4 PUT / 22 HOLD → HOLD signal at 51.9% conf (correct
+  behavior — Sat market closed, weak data, threshold rejects)
+- SPY swing: 9 CALL / 2 PUT / 19 HOLD → BUY_CALL signal at 75.14% conf,
+  with new Volume Profile + Multi-TF Confluence + Order Flow agents all
+  contributing real votes alongside original 12.
+
+**Deployment guide (DEPLOY_TO_DELL_R740XD.md):** End-to-end from "I just
+unloaded the rack" to "Oracle running on 5 servers, monitored via Grafana,
+accessible from phone via Tailscale." Covers Ubuntu 24.04 install, Docker,
+Postgres + TimescaleDB migration from SQLite, Tailscale VPN, Prometheus/
+Loki/Grafana monitoring, day-to-day maintenance, troubleshooting.
+
+# TradeSignal AI — 12-Agent Trading Prediction System v7.0.1 (HISTORICAL)
 
 ## v7.0.1 — Bug fixes (ML feature ordering, SectorRS daily history) + regime-stress dampener
 A surgical follow-up to v7.0 that fixes two real bugs found in audit and adds

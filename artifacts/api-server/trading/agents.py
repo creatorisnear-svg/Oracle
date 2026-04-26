@@ -1,19 +1,31 @@
 """
-12 Trading Prediction Agents + Judge  (v7.0.2 — soft-consensus tier added)
+30 Trading Prediction Agents + Judge  (v7.1.0 — Tier 1/2/3 expansion)
 Signals: BUY_CALL | BUY_PUT | HOLD
-Agents: Price Action, Technical, Volume, Sentiment, Options Flow, Momentum,
-        Risk, Fear & Greed, Political, ML, Sector RS, Market Regime.
+
+Original 12 (core): Price Action, Technical, Volume, Sentiment, Options Flow,
+        Momentum, Risk, Fear & Greed, Political, ML, Sector RS, Market Regime.
+
+Tier 1 — free public-data agents (#13–22):
+        Earnings Calendar, Insider Trading, Short Interest, Options Skew,
+        Macro Events (FOMC/CPI/NFP), Correlation, Analyst Ratings,
+        Social Sentiment, Search Trends, Yield Curve.
+
+Tier 2 — computed-from-existing-data agents (#23–27):
+        Volume Profile, Market Internals, Volatility Regime,
+        Multi-TF Confluence, Seasonality.
+
+Tier 3 — proxy-based agents pending real data feeds (#28–30):
+        Dark Pool Activity, ETF Flow, Order Flow Imbalance.
 
 Judge fires at the horizon's THRESHOLD with two tiers:
-  • HARD tier   — winning side ≥ threshold (default 7/12 ≈ 58%)
-  • SOFT tier   — winning side ≥ threshold-1 AND directional dominance ≥ 3:1
-                  (handles the case where 4-6 agents abstain to HOLD,
-                  shrinking the directional vote pool to 6-8). Soft-fired
-                  signals carry a 12% confidence haircut and still must clear
-                  EVERY downstream gate (pillar score, conviction-dominance
-                  ≥1.20×, ADX-chop, weekly counter-trend, overextension,
-                  earnings) — so quality stays high while clean 6:2 setups
-                  no longer get vetoed by raw count alone.
+  • HARD tier   — winning side ≥ threshold (default 14/30 ≈ 47% of all,
+                  ≈ 70% of typically-voting pool given Tier-2/3 abstentions)
+  • SOFT tier   — winning side ≥ threshold-3 AND directional dominance ≥ 3:1
+                  (handles the case where Tier-2/3 agents abstain to HOLD,
+                  shrinking the directional vote pool). Soft-fired signals
+                  carry a 12% confidence haircut and still must clear EVERY
+                  downstream gate (pillar score, conviction-dominance ≥1.20×,
+                  ADX-chop, weekly counter-trend, overextension, earnings).
 
 The conviction-dominance veto (WEIGHT-AWARE — multiplies confidence by each
 agent's learned reliability), evidence-pillar floor, ADX-chop filter,
@@ -83,12 +95,12 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 5,
         "target_hit_bars": 24,      # 2 hours
         "stop_mult": 0.7, "tgt_mult": 0.9,
-        # Threshold = 7/12 (≈58%). Bumped 6→7 in v7.0 with the addition
-        # of Sector-RS and Market-Regime agents (now 12 total). Keeps the
-        # consensus bar at ~58% (7/12) — was 6/10=60% pre-v7.0
-        # because the two new agents act as filters (often vote HOLD when
-        # macro/sector are unclear), so requiring 8/12 would over-restrict.
-        "threshold": 7,
+        # v7.1: 14/30 (~47% of all, ~70% of typically-voting pool). With 18
+        # new Tier-1/2/3 agents, several legitimately HOLD when their data
+        # source isn't wired (FRED, social, dark pool), so a flat 17/30 would
+        # over-restrict. Soft tier (threshold-3 = 11/30 + 3:1 dominance) plus
+        # all downstream gates still keep quality high.
+        "threshold": 14,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",  # confirm with hourly trend
         "expiry_pref": "0DTE / weekly",
@@ -100,9 +112,9 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 15,
         "target_hit_bars": 16,      # rest of day
         "stop_mult": 0.8, "tgt_mult": 1.1,
-        # 7/12 = 58% — same reasoning as intraday. Pillar floor at 1.5 plus
+        # v7.1: 14/30 — same reasoning as intraday. Pillar floor at 1.5 plus
         # the HTF tilt and conviction-dominance gates still filter.
-        "threshold": 7,
+        "threshold": 14,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",
         "expiry_pref": "0DTE / weekly",
@@ -114,7 +126,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 60,
         "target_hit_bars": 30,
         "stop_mult": 1.0, "tgt_mult": 1.4,
-        "threshold": 7,             # 7/12 — HTF + conviction gates do the filtering
+        "threshold": 14,            # v7.1: 14/30 — HTF + conviction gates do the filtering
         "min_pillar_score": 1.0,
         "htf_period": "6mo", "htf_interval": "1d",  # daily trend gate
         "expiry_pref": "weekly / 2-week",
@@ -126,7 +138,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 24 * 60,
         "target_hit_bars": 7,
         "stop_mult": 1.1, "tgt_mult": 1.3,
-        "threshold": 7,
+        "threshold": 14,            # v7.1: 14/30
         "min_pillar_score": 1.0,
         "htf_period": "1y", "htf_interval": "1wk",  # weekly trend gate
         "expiry_pref": "2-week / monthly",
@@ -2077,13 +2089,829 @@ class MarketRegimeAgent:
             return _hold(self.name, self.emoji, f"Error: {e}")
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# v7.1.0 — TIER 1/2/3 EXPANSION AGENTS (#13–30)
+# Adds 18 new analytical lenses on top of the original 12. Each agent must:
+#   • return _vote(...) or _hold(...) — never raise
+#   • degrade to _hold("data unavailable") when its data source is missing
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+# ─── 13. EARNINGS CALENDAR AGENT ────────────────────────────────────────────
+class EarningsCalendarAgent:
+    name = "Earnings Calendar Agent"
+    emoji = "📅"
+    method = "Pre-/post-earnings drift + binary-event veto"
+
+    def analyze(self, df, ind):
+        try:
+            er = ind.get("earnings") or {}
+            days = er.get("days_to_earnings")
+            if days is None:
+                return _hold(self.name, self.emoji, "No earnings calendar data")
+            days = int(days)
+            # Within 2 trading days of report → flat (binary risk)
+            if 0 <= days <= 2:
+                return _hold(self.name, self.emoji, f"Earnings in {days}d — binary risk, flat")
+            # Pre-earnings drift window (3-7 days out): historically slight bullish drift
+            if 3 <= days <= 7:
+                # Confirm with recent momentum — drift only works if uptrending
+                ts = float(ind.get("trend_score") or 0)
+                if ts > 0.3:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 60,
+                                 f"Pre-earnings drift window ({days}d), uptrend confirms")
+                if ts < -0.3:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 58,
+                                 f"Pre-earnings ({days}d) into downtrend — guidance risk")
+                return _hold(self.name, self.emoji, f"Earnings in {days}d, no clear drift")
+            # Post-earnings momentum (1-5 days after): trend usually continues
+            days_since = er.get("days_since_earnings")
+            if days_since is not None and 1 <= int(days_since) <= 5:
+                last_move = float(er.get("last_earnings_move_pct") or 0)
+                if last_move > 2.0:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 62,
+                                 f"Post-earnings drift +{last_move:.1f}% (D+{days_since})")
+                if last_move < -2.0:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 62,
+                                 f"Post-earnings drift {last_move:.1f}% (D+{days_since})")
+            return _hold(self.name, self.emoji, f"Outside earnings window ({days}d)")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 14. INSIDER TRADING AGENT ──────────────────────────────────────────────
+class InsiderTradingAgent:
+    name = "Insider Trading Agent"
+    emoji = "🕵️"
+    method = "SEC Form 4 net-buy/sell ratio (yfinance insider transactions)"
+
+    def analyze(self, df, ind):
+        try:
+            insider = ind.get("insider_activity") or {}
+            net = insider.get("net_shares_90d")
+            if net is None:
+                # Try info fallback
+                info = ind.get("_info") or {}
+                pct_held = info.get("heldPercentInsiders") or 0
+                if pct_held and pct_held > 0.20:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 55,
+                                 f"High insider ownership ({pct_held*100:.0f}%) — alignment")
+                return _hold(self.name, self.emoji, "No insider transaction data")
+            buys = int(insider.get("buy_count_90d") or 0)
+            sells = int(insider.get("sell_count_90d") or 0)
+            total_value = float(insider.get("net_value_90d") or 0)
+            # Cluster buying (3+ buyers) is one of the strongest single-name signals in academic literature
+            if net > 0 and buys >= 3:
+                conf = min(78, 60 + buys * 3)
+                return _vote(self.name, self.emoji, "BUY_CALL", conf,
+                             f"Cluster insider buying: {buys} buyers, ${total_value/1e6:.1f}M net")
+            if net < 0 and sells >= 5 and total_value < -5e6:
+                # Heavy selling only matters when it's NOT just routine 10b5-1 plans
+                return _vote(self.name, self.emoji, "BUY_PUT", 60,
+                             f"Heavy insider selling: {sells} sellers, ${abs(total_value)/1e6:.1f}M out")
+            if net > 0:
+                return _vote(self.name, self.emoji, "BUY_CALL", 55,
+                             f"Net insider buying ({buys}b/{sells}s)")
+            return _hold(self.name, self.emoji, f"Mixed insider activity ({buys}b/{sells}s)")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 15. SHORT INTEREST AGENT ───────────────────────────────────────────────
+class ShortInterestAgent:
+    name = "Short Interest Agent"
+    emoji = "📉"
+    method = "Short %float + days-to-cover + squeeze detection"
+
+    def analyze(self, df, ind):
+        try:
+            sq = ind.get("short_squeeze") or {}
+            info = ind.get("_info") or {}
+            short_pct = float(sq.get("short_pct_float") or info.get("shortPercentOfFloat") or 0)
+            short_pct = short_pct * 100 if short_pct < 1.0 else short_pct  # normalize
+            dtc = float(sq.get("days_to_cover") or info.get("shortRatio") or 0)
+            score = float(sq.get("squeeze_score") or 0)
+            chg = float(ind.get("change_1d") or 0)
+            rv = float(ind.get("rel_volume") or 1)
+
+            if short_pct < 5:
+                return _hold(self.name, self.emoji, f"Low short interest ({short_pct:.1f}%)")
+            # Squeeze setup: high short + price up + above-avg volume
+            if short_pct >= 15 and chg > 1.5 and rv > 1.4:
+                conf = min(80, 60 + short_pct * 0.6)
+                return _vote(self.name, self.emoji, "BUY_CALL", conf,
+                             f"Squeeze setup: {short_pct:.1f}% short, +{chg:.1f}% on {rv:.1f}×vol")
+            # Reverse: high short + price down = momentum continuation (shorts winning)
+            if short_pct >= 20 and chg < -2.0:
+                return _vote(self.name, self.emoji, "BUY_PUT", 65,
+                             f"Short bears in control: {short_pct:.1f}% short, {chg:.1f}%")
+            # Elevated DTC = vulnerability either way; lean direction of trend
+            if dtc >= 4.0:
+                ts = float(ind.get("trend_score") or 0)
+                if ts > 0.4:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 60,
+                                 f"DTC {dtc:.1f}d + uptrend = squeeze fuel")
+                if ts < -0.4:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 58,
+                                 f"DTC {dtc:.1f}d + downtrend = continuation")
+            return _hold(self.name, self.emoji, f"Short int. {short_pct:.1f}%, no setup")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 16. OPTIONS SKEW AGENT ─────────────────────────────────────────────────
+class OptionsSkewAgent:
+    name = "Options Skew Agent"
+    emoji = "🎭"
+    method = "Put/call IV skew + risk-reversal direction"
+
+    def analyze(self, df, ind):
+        try:
+            chain = ind.get("options_chain") or ind.get("options_data") or {}
+            put_iv = float(chain.get("put_iv_atm") or chain.get("avg_put_iv") or 0)
+            call_iv = float(chain.get("call_iv_atm") or chain.get("avg_call_iv") or 0)
+            if put_iv <= 0 or call_iv <= 0:
+                # Fallback: use put/call ratio if skew unavailable
+                pcr = float(chain.get("put_call_ratio") or 0)
+                if pcr >= 1.5:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 58,
+                                 f"Extreme put/call ratio {pcr:.2f} — contrarian bullish")
+                if pcr <= 0.55:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 56,
+                                 f"Extreme call greed PCR {pcr:.2f} — contrarian bearish")
+                return _hold(self.name, self.emoji, "No skew data")
+            skew = put_iv / call_iv
+            # Heavy put premium (skew > 1.20) = institutional hedging or fear
+            # Reverse: call premium > put premium (skew < 0.95) = retail call buying
+            if skew >= 1.25:
+                # Strong fear hedging; if price hasn't broken down, contrarian bullish
+                chg5 = float(ind.get("change_5d") or 0)
+                if chg5 > -3:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 62,
+                                 f"Skew {skew:.2f} (heavy puts) + price holding — wall of worry")
+                else:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 65,
+                                 f"Skew {skew:.2f} confirmed by {chg5:.1f}% drop")
+            if skew <= 0.92:
+                return _vote(self.name, self.emoji, "BUY_PUT", 60,
+                             f"Inverse skew {skew:.2f} — call greed = top warning")
+            if 1.05 <= skew <= 1.18:
+                return _vote(self.name, self.emoji, "BUY_CALL", 55,
+                             f"Healthy skew {skew:.2f} (normal hedging)")
+            return _hold(self.name, self.emoji, f"Neutral skew {skew:.2f}")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 17. MACRO EVENTS AGENT ─────────────────────────────────────────────────
+class MacroEventsAgent:
+    name = "Macro Events Agent"
+    emoji = "🌐"
+    method = "FOMC / CPI / NFP proximity + post-event direction"
+
+    # Known FOMC meeting dates (extend annually)
+    FOMC_DATES_2025_2026 = [
+        "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18",
+        "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10",
+        "2026-01-28", "2026-03-18", "2026-05-06", "2026-06-17",
+        "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+    ]
+
+    def _days_to_next(self, dates):
+        today = datetime.now(timezone.utc).date()
+        upcoming = []
+        for d in dates:
+            try:
+                dt = datetime.strptime(d, "%Y-%m-%d").date()
+                if dt >= today:
+                    upcoming.append((dt - today).days)
+            except Exception:
+                pass
+        return min(upcoming) if upcoming else None
+
+    def analyze(self, df, ind):
+        try:
+            days_fomc = self._days_to_next(self.FOMC_DATES_2025_2026)
+            today = datetime.now(timezone.utc)
+            dom = today.day
+            # CPI usually released ~10th-15th of month, NFP first Friday
+            near_cpi = 8 <= dom <= 16
+            first_friday = today.weekday() == 4 and dom <= 7
+            spy_5d = float((ind.get("spy_trend") or {}).get("change_5d") or 0)
+            vix = float((ind.get("market_regime") or {}).get("vix") or 20)
+
+            if days_fomc is not None and days_fomc <= 1:
+                return _hold(self.name, self.emoji,
+                             f"FOMC in {days_fomc}d — flatten before binary event")
+            if first_friday:
+                return _hold(self.name, self.emoji, "NFP day — wait for tape")
+            if near_cpi and vix < 18:
+                return _hold(self.name, self.emoji,
+                             f"CPI window (D{dom}) + low VIX — vol expansion risk")
+            # FOMC week with established trend → pre-event drift bias
+            if days_fomc is not None and 2 <= days_fomc <= 5:
+                if spy_5d > 1.5:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 58,
+                                 f"Pre-FOMC drift ({days_fomc}d), SPY +{spy_5d:.1f}% 5d")
+                if spy_5d < -1.5:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 58,
+                                 f"Pre-FOMC weakness ({days_fomc}d), SPY {spy_5d:.1f}%")
+            return _hold(self.name, self.emoji, "No imminent macro event")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 18. CORRELATION AGENT ──────────────────────────────────────────────────
+class CorrelationAgent:
+    name = "Correlation Agent"
+    emoji = "🔗"
+    method = "Rolling correlation vs SPY — coupling/decoupling regime"
+
+    def analyze(self, df, ind):
+        try:
+            sym = ind.get("_symbol", "")
+            if sym == "SPY":
+                return _hold(self.name, self.emoji, "Self-correlation N/A for SPY")
+            closes = df["Close"].values
+            if len(closes) < 30:
+                return _hold(self.name, self.emoji, "Insufficient history")
+            # Use SPY trend as proxy correlation axis
+            spy = ind.get("spy_trend") or {}
+            spy_chg5 = float(spy.get("change_5d") or 0)
+            sym_chg5 = float(ind.get("change_5d") or 0)
+            # Pseudo-correlation from recent move agreement
+            if abs(spy_chg5) < 0.5:
+                return _hold(self.name, self.emoji, "SPY flat — correlation undefined")
+            # Decoupling: stock moves opposite to market = idiosyncratic strength/weakness
+            decoup = (sym_chg5 > 1.5 and spy_chg5 < -0.5) or (sym_chg5 < -1.5 and spy_chg5 > 0.5)
+            high_corr = abs(sym_chg5 - spy_chg5) < 0.8 and abs(spy_chg5) > 1.0
+
+            ts = float(ind.get("trend_score") or 0)
+            if decoup and sym_chg5 > 0:
+                return _vote(self.name, self.emoji, "BUY_CALL", 65,
+                             f"Decoupling strength: +{sym_chg5:.1f}% vs SPY {spy_chg5:.1f}%")
+            if decoup and sym_chg5 < 0:
+                return _vote(self.name, self.emoji, "BUY_PUT", 64,
+                             f"Decoupling weakness: {sym_chg5:.1f}% vs SPY {spy_chg5:.1f}%")
+            if high_corr:
+                # Move WITH market — vote market direction
+                if spy_chg5 > 1.2:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 55,
+                                 f"High SPY correlation, market +{spy_chg5:.1f}%")
+                if spy_chg5 < -1.2:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 55,
+                                 f"High SPY correlation, market {spy_chg5:.1f}%")
+            return _hold(self.name, self.emoji, f"Mixed correlation regime")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 19. ANALYST RATINGS AGENT ──────────────────────────────────────────────
+class AnalystRatingsAgent:
+    name = "Analyst Ratings Agent"
+    emoji = "📊"
+    method = "Upgrade/downgrade momentum + price target gap"
+
+    def analyze(self, df, ind):
+        try:
+            info = ind.get("_info") or {}
+            ar = ind.get("analyst_ratings") or {}
+            rec_mean = float(ar.get("recommendation_mean")
+                           or info.get("recommendationMean") or 0)
+            target_mean = float(ar.get("target_mean_price")
+                               or info.get("targetMeanPrice") or 0)
+            n_analysts = int(ar.get("number_of_analysts")
+                            or info.get("numberOfAnalystOpinions") or 0)
+            price = float(ind.get("price") or 0)
+            up_30d = int(ar.get("upgrades_30d") or 0)
+            down_30d = int(ar.get("downgrades_30d") or 0)
+
+            if n_analysts < 3:
+                return _hold(self.name, self.emoji, "Too few analysts")
+            # rec_mean: 1=Strong Buy, 2=Buy, 3=Hold, 4=Sell, 5=Strong Sell
+            target_gap_pct = ((target_mean - price) / price * 100) if price > 0 and target_mean > 0 else 0
+
+            if up_30d - down_30d >= 3:
+                return _vote(self.name, self.emoji, "BUY_CALL", 65,
+                             f"{up_30d} upgrades vs {down_30d} downgrades 30d")
+            if down_30d - up_30d >= 3:
+                return _vote(self.name, self.emoji, "BUY_PUT", 63,
+                             f"{down_30d} downgrades vs {up_30d} upgrades 30d")
+            # Strong target gap with positive consensus
+            if target_gap_pct >= 12 and rec_mean > 0 and rec_mean <= 2.3:
+                return _vote(self.name, self.emoji, "BUY_CALL", 60,
+                             f"Target {target_gap_pct:+.1f}% above price, rec={rec_mean:.1f}")
+            if target_gap_pct <= -8 and rec_mean >= 3.3:
+                return _vote(self.name, self.emoji, "BUY_PUT", 58,
+                             f"Target {target_gap_pct:.1f}% below price, rec={rec_mean:.1f}")
+            return _hold(self.name, self.emoji, f"Neutral analyst stance ({n_analysts} an, rec={rec_mean:.1f})")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 20. REDDIT/SOCIAL SENTIMENT AGENT ──────────────────────────────────────
+class RedditSentimentAgent:
+    name = "Social Sentiment Agent"
+    emoji = "🔥"
+    method = "Retail-meme proxy via volume/momentum spikes on hot tickers"
+
+    HOT_TICKERS = {"TSLA", "GME", "AMC", "NVDA", "PLTR", "AMD", "META",
+                   "AAPL", "MSFT", "RIVN", "LCID", "BBBY", "NIO", "COIN",
+                   "MARA", "RIOT", "MSTR", "HOOD", "SOFI"}
+
+    def analyze(self, df, ind):
+        try:
+            sym = (ind.get("_symbol") or "").upper()
+            social = ind.get("social_sentiment") or {}
+            score = social.get("composite_score")
+            mentions = int(social.get("mention_count_24h") or 0)
+            if score is not None:
+                score = float(score)
+                if score >= 0.4 and mentions >= 50:
+                    return _vote(self.name, self.emoji, "BUY_CALL", min(72, 55 + mentions / 20),
+                                 f"Social bullish ({score:+.2f}), {mentions} mentions/24h")
+                if score <= -0.4 and mentions >= 50:
+                    return _vote(self.name, self.emoji, "BUY_PUT", min(70, 55 + mentions / 20),
+                                 f"Social bearish ({score:+.2f}), {mentions} mentions/24h")
+            # Fallback heuristic for hot tickers when no social API connected
+            if sym in self.HOT_TICKERS:
+                rv = float(ind.get("rel_volume") or 1)
+                chg = float(ind.get("change_1d") or 0)
+                if rv > 2.5 and chg > 3:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 64,
+                                 f"Retail momentum: +{chg:.1f}% on {rv:.1f}×vol (hot ticker)")
+                if rv > 2.5 and chg < -4:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 63,
+                                 f"Retail capitulation: {chg:.1f}% on {rv:.1f}×vol")
+            return _hold(self.name, self.emoji, "No social signal")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 21. GOOGLE TRENDS AGENT ────────────────────────────────────────────────
+class GoogleTrendsAgent:
+    name = "Search Trends Agent"
+    emoji = "🔍"
+    method = "Search volume momentum (pytrends) — early demand indicator"
+
+    def analyze(self, df, ind):
+        try:
+            gt = ind.get("google_trends") or {}
+            interest_now = float(gt.get("interest_now") or 0)
+            interest_avg = float(gt.get("interest_30d_avg") or 0)
+            if interest_now <= 0 or interest_avg <= 0:
+                return _hold(self.name, self.emoji, "No trends data")
+            ratio = interest_now / interest_avg
+            chg = float(ind.get("change_5d") or 0)
+            # Surging search + price up = real momentum
+            if ratio >= 1.5 and chg > 0:
+                return _vote(self.name, self.emoji, "BUY_CALL", min(70, 55 + (ratio - 1) * 20),
+                             f"Search interest +{(ratio-1)*100:.0f}% above avg")
+            # Surging search + price down = panic search ("why is X falling")
+            if ratio >= 1.5 and chg < -3:
+                return _vote(self.name, self.emoji, "BUY_PUT", 60,
+                             f"Panic search spike ({ratio:.2f}×) + {chg:.1f}%")
+            # Collapsing interest = waning investor attention = drift down
+            if ratio <= 0.6:
+                return _vote(self.name, self.emoji, "BUY_PUT", 55,
+                             f"Search interest collapsed ({ratio:.2f}× of avg)")
+            return _hold(self.name, self.emoji, f"Stable search ({ratio:.2f}×)")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 22. YIELD CURVE AGENT ──────────────────────────────────────────────────
+class YieldCurveAgent:
+    name = "Yield Curve Agent"
+    emoji = "💵"
+    method = "10y/2y + 10y/3m slope — risk-on/risk-off macro gate"
+
+    def analyze(self, df, ind):
+        try:
+            yc = ind.get("yield_curve") or {}
+            ten_yr = float(yc.get("ten_year") or 0)
+            two_yr = float(yc.get("two_year") or 0)
+            three_mo = float(yc.get("three_month") or 0)
+            slope_2_10 = ten_yr - two_yr
+            slope_3m_10 = ten_yr - three_mo
+            chg_10y_5d = float(yc.get("ten_year_change_5d") or 0)
+            sym = (ind.get("_symbol") or "").upper()
+            sector = ((ind.get("_info") or {}).get("sector") or "").lower()
+
+            if ten_yr <= 0 or two_yr <= 0:
+                return _hold(self.name, self.emoji, "No yield curve data")
+            # Inverted curve = recession risk → defensive sectors win
+            inverted = slope_2_10 < -0.10
+            steepening = slope_2_10 > 0.30 and chg_10y_5d > 0
+            # Rate-sensitive sectors: tech, real estate, utilities
+            rate_sensitive = any(k in sector for k in ["technolog", "real estate", "utilit"])
+            financial = "financ" in sector or sym in {"JPM", "BAC", "GS", "MS", "WFC", "C"}
+
+            if inverted and rate_sensitive:
+                return _vote(self.name, self.emoji, "BUY_PUT", 60,
+                             f"Curve inverted ({slope_2_10:+.2f}), rate-sensitive sector vulnerable")
+            if steepening and financial:
+                return _vote(self.name, self.emoji, "BUY_CALL", 62,
+                             f"Curve steepening ({slope_2_10:+.2f}), financials benefit")
+            if inverted:
+                return _vote(self.name, self.emoji, "BUY_PUT", 55,
+                             f"Inverted curve macro risk ({slope_2_10:+.2f})")
+            if steepening:
+                return _vote(self.name, self.emoji, "BUY_CALL", 56,
+                             f"Bull-steepening curve risk-on ({slope_2_10:+.2f})")
+            return _hold(self.name, self.emoji, f"Neutral curve ({slope_2_10:+.2f})")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 23. VOLUME PROFILE AGENT ───────────────────────────────────────────────
+class VolumeProfileAgent:
+    name = "Volume Profile Agent"
+    emoji = "📐"
+    method = "POC / VAH / VAL — institutional value-area breakout/rejection"
+
+    def analyze(self, df, ind):
+        try:
+            highs = df["High"].values.astype(float)
+            lows = df["Low"].values.astype(float)
+            closes = df["Close"].values.astype(float)
+            vols = df["Volume"].values.astype(float)
+            n = len(closes)
+            if n < 30:
+                return _hold(self.name, self.emoji, "Insufficient bars")
+            # Build 30-bar histogram
+            window = min(50, n)
+            h = highs[-window:]; l = lows[-window:]; v = vols[-window:]
+            lo, hi = float(l.min()), float(h.max())
+            if hi - lo <= 0:
+                return _hold(self.name, self.emoji, "No range")
+            bins = 24
+            edges = np.linspace(lo, hi, bins + 1)
+            vol_at_price = np.zeros(bins)
+            for i in range(window):
+                mid = (h[i] + l[i]) / 2
+                idx = min(int((mid - lo) / (hi - lo) * bins), bins - 1)
+                vol_at_price[idx] += v[i]
+            poc_idx = int(np.argmax(vol_at_price))
+            poc = float((edges[poc_idx] + edges[poc_idx + 1]) / 2)
+            # Value area = 70% of volume around POC
+            total = float(vol_at_price.sum())
+            target = total * 0.70
+            included = vol_at_price[poc_idx]
+            lo_idx = hi_idx = poc_idx
+            while included < target and (lo_idx > 0 or hi_idx < bins - 1):
+                lo_v = vol_at_price[lo_idx - 1] if lo_idx > 0 else -1
+                hi_v = vol_at_price[hi_idx + 1] if hi_idx < bins - 1 else -1
+                if hi_v >= lo_v:
+                    hi_idx += 1; included += hi_v
+                else:
+                    lo_idx -= 1; included += lo_v
+            val = float(edges[lo_idx])
+            vah = float(edges[hi_idx + 1])
+            price = float(closes[-1])
+            rv = float(ind.get("rel_volume") or 1)
+
+            if price > vah and rv > 1.2:
+                return _vote(self.name, self.emoji, "BUY_CALL", 66,
+                             f"Breakout above VAH ${vah:.2f} on {rv:.1f}×vol (POC ${poc:.2f})")
+            if price < val and rv > 1.2:
+                return _vote(self.name, self.emoji, "BUY_PUT", 66,
+                             f"Breakdown below VAL ${val:.2f} on {rv:.1f}×vol (POC ${poc:.2f})")
+            # Mean reversion to POC if extended
+            dist_from_poc = (price - poc) / poc * 100
+            if dist_from_poc > 4 and price < vah:
+                return _vote(self.name, self.emoji, "BUY_PUT", 56,
+                             f"Above POC by {dist_from_poc:+.1f}% — mean revert toward ${poc:.2f}")
+            if dist_from_poc < -4 and price > val:
+                return _vote(self.name, self.emoji, "BUY_CALL", 56,
+                             f"Below POC by {dist_from_poc:+.1f}% — mean revert toward ${poc:.2f}")
+            return _hold(self.name, self.emoji, f"In value area (POC ${poc:.2f})")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 24. MARKET INTERNALS AGENT ─────────────────────────────────────────────
+class MarketInternalsAgent:
+    name = "Market Internals Agent"
+    emoji = "🌡️"
+    method = "Sector breadth + small/large-cap divergence (SPY/QQQ/IWM/XLU)"
+
+    def analyze(self, df, ind):
+        try:
+            mr = ind.get("market_regime") or {}
+            sr = ind.get("sector_rotation") or {}
+            breadth = float(mr.get("sector_breadth") or 0.5)  # 0-1, fraction green
+            qqq_chg = float(sr.get("qqq_change_5d") or 0)
+            iwm_chg = float(sr.get("iwm_change_5d") or 0)
+            spy_chg = float((ind.get("spy_trend") or {}).get("change_5d") or 0)
+            xlu_chg = float(sr.get("xlu_change_5d") or 0)  # utilities = defensive
+
+            # Risk-on: small caps leading (IWM > SPY > XLU)
+            if iwm_chg > spy_chg + 0.5 and xlu_chg < spy_chg and breadth > 0.55:
+                return _vote(self.name, self.emoji, "BUY_CALL", 64,
+                             f"Risk-on internals: IWM {iwm_chg:+.1f}% > SPY {spy_chg:+.1f}%, breadth {breadth:.0%}")
+            # Risk-off: defensive leading (XLU > SPY, IWM lagging)
+            if xlu_chg > spy_chg + 0.3 and iwm_chg < spy_chg - 0.3 and breadth < 0.40:
+                return _vote(self.name, self.emoji, "BUY_PUT", 62,
+                             f"Risk-off internals: XLU {xlu_chg:+.1f}% leading, breadth {breadth:.0%}")
+            # Strong breadth thrust
+            if breadth > 0.70:
+                return _vote(self.name, self.emoji, "BUY_CALL", 58,
+                             f"Broad strength: {breadth:.0%} sectors green")
+            if breadth < 0.30:
+                return _vote(self.name, self.emoji, "BUY_PUT", 58,
+                             f"Broad weakness: only {breadth:.0%} sectors green")
+            return _hold(self.name, self.emoji, f"Mixed internals ({breadth:.0%} breadth)")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 25. VOLATILITY REGIME AGENT ────────────────────────────────────────────
+class VolatilityRegimeAgent:
+    name = "Volatility Regime Agent"
+    emoji = "🌊"
+    method = "VIX term structure (VIX vs VIX9D) + IV percentile"
+
+    def analyze(self, df, ind):
+        try:
+            mr = ind.get("market_regime") or {}
+            vix = float(mr.get("vix") or 0)
+            vix9d = float(mr.get("vix9d") or 0)
+            vix_chg = float(mr.get("vix_change_5d") or 0)
+
+            if vix <= 0:
+                return _hold(self.name, self.emoji, "No VIX data")
+            # VIX9D > VIX = backwardation = panic / acute stress → contrarian bullish
+            if vix9d > 0 and vix9d > vix * 1.05:
+                return _vote(self.name, self.emoji, "BUY_CALL", 64,
+                             f"VIX backwardation ({vix9d:.1f}>{vix:.1f}) — capitulation buy")
+            # Steep contango with very low VIX = complacency, vol expansion risk
+            if vix < 13 and vix9d > 0 and vix9d < vix * 0.92:
+                return _vote(self.name, self.emoji, "BUY_PUT", 58,
+                             f"Complacency (VIX {vix:.1f}, steep contango) — protect")
+            # VIX spiking but no backwardation yet = trend continuing down
+            if vix_chg > 25 and vix > 22:
+                return _vote(self.name, self.emoji, "BUY_PUT", 60,
+                             f"VIX +{vix_chg:.0f}% to {vix:.1f} — fear building")
+            # VIX falling from elevated levels = relief rally
+            if vix_chg < -15 and vix < 20:
+                return _vote(self.name, self.emoji, "BUY_CALL", 60,
+                             f"VIX collapsing ({vix_chg:+.0f}%) — risk-on resumption")
+            return _hold(self.name, self.emoji, f"Stable vol regime (VIX {vix:.1f})")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 26. MULTI-TIMEFRAME CONFLUENCE AGENT ───────────────────────────────────
+class MultiTimeframeConfluenceAgent:
+    name = "Multi-TF Confluence Agent"
+    emoji = "🎯"
+    method = "1h/4h/1d trend alignment — only fire when all align"
+
+    def analyze(self, df, ind):
+        try:
+            closes = df["Close"].values.astype(float)
+            n = len(closes)
+            if n < 60:
+                return _hold(self.name, self.emoji, "Insufficient history")
+
+            def ema(arr, span):
+                k = 2.0 / (span + 1.0)
+                out = np.empty_like(arr)
+                out[0] = arr[0]
+                for i in range(1, len(arr)):
+                    out[i] = arr[i] * k + out[i - 1] * (1 - k)
+                return out
+
+            # Use the existing window to build pseudo-MTF: short/med/long EMAs
+            e_short = ema(closes, 10)[-1]
+            e_med = ema(closes, 30)[-1]
+            e_long = ema(closes, min(60, n - 1))[-1]
+            price = closes[-1]
+            # Plus the HTF trend object the server precomputed
+            htf = ind.get("_htf_trend") or {}
+            htf_dir = int(htf.get("direction") or 0)
+            weekly = ind.get("weekly_trend") or {}
+            wk_dir = 1 if "up" in str(weekly.get("label", "")) else (-1 if "down" in str(weekly.get("label", "")) else 0)
+
+            short_up = price > e_short > e_med
+            med_up = e_med > e_long
+            short_dn = price < e_short < e_med
+            med_dn = e_med < e_long
+
+            tf_up = sum([short_up, med_up, htf_dir > 0, wk_dir > 0])
+            tf_dn = sum([short_dn, med_dn, htf_dir < 0, wk_dir < 0])
+
+            if tf_up >= 4:
+                return _vote(self.name, self.emoji, "BUY_CALL", 75,
+                             "All 4 timeframes aligned bullish (10/30/60 + HTF + weekly)")
+            if tf_dn >= 4:
+                return _vote(self.name, self.emoji, "BUY_PUT", 75,
+                             "All 4 timeframes aligned bearish")
+            if tf_up == 3 and tf_dn == 0:
+                return _vote(self.name, self.emoji, "BUY_CALL", 64, "3/4 timeframes bullish")
+            if tf_dn == 3 and tf_up == 0:
+                return _vote(self.name, self.emoji, "BUY_PUT", 64, "3/4 timeframes bearish")
+            return _hold(self.name, self.emoji, f"Mixed timeframes (up={tf_up}, dn={tf_dn})")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 27. SEASONALITY AGENT ──────────────────────────────────────────────────
+class SeasonalityAgent:
+    name = "Seasonality Agent"
+    emoji = "🗓️"
+    method = "Day-of-week + OPEX-week + month-end + Santa-rally biases"
+
+    def analyze(self, df, ind):
+        try:
+            now = datetime.now(timezone.utc)
+            dow = now.weekday()  # 0=Mon
+            dom = now.day
+            month = now.month
+            # OPEX week = week containing the 3rd Friday
+            third_friday_dom_min = 15
+            third_friday_dom_max = 21
+            is_opex_week = dow <= 4 and third_friday_dom_min <= dom <= third_friday_dom_max
+            is_eom = dom >= 27  # last few trading days of month
+            is_som = dom <= 3
+            is_santa = (month == 12 and dom >= 22) or (month == 1 and dom <= 3)
+
+            ts = float(ind.get("trend_score") or 0)
+            biases = []
+            score = 0
+            if dow == 0:  # Monday — historically slightly bearish (Monday effect)
+                score -= 0.5; biases.append("Mon weakness")
+            if dow == 4:  # Friday — slight bullish bias
+                score += 0.3; biases.append("Fri strength")
+            if is_opex_week:
+                # OPEX week: pin/gamma effects, often range-bound, slight bullish
+                score += 0.4; biases.append("OPEX week")
+            if is_eom:
+                score += 0.6; biases.append("EOM rebalance buy")
+            if is_som:
+                score += 0.4; biases.append("SOM 401k inflows")
+            if is_santa:
+                score += 1.0; biases.append("Santa Claus rally window")
+            if month == 9 and dow >= 3:  # Sep weakness
+                score -= 0.5; biases.append("September weakness")
+
+            tag = "/".join(biases) if biases else "no seasonal edge"
+            # Only fire when seasonality CONFIRMS trend — never fight tape on dates alone
+            if score >= 0.8 and ts > 0.2:
+                return _vote(self.name, self.emoji, "BUY_CALL", 56, f"Bullish season + trend: {tag}")
+            if score <= -0.8 and ts < -0.2:
+                return _vote(self.name, self.emoji, "BUY_PUT", 56, f"Bearish season + trend: {tag}")
+            return _hold(self.name, self.emoji, tag)
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 28. DARK POOL / INSTITUTIONAL ACTIVITY AGENT ──────────────────────────
+class DarkPoolAgent:
+    name = "Dark Pool Activity Agent"
+    emoji = "🌚"
+    method = "After-hours volume + tight intraday range = institutional accumulation proxy"
+
+    def analyze(self, df, ind):
+        try:
+            dp = ind.get("dark_pool") or {}
+            dp_pct = float(dp.get("dark_pool_pct_volume") or 0)  # if real data wired
+            dp_buy_ratio = float(dp.get("buy_volume_ratio") or 0)
+            if dp_pct > 0:
+                if dp_pct > 45 and dp_buy_ratio > 0.55:
+                    return _vote(self.name, self.emoji, "BUY_CALL", 70,
+                                 f"DP {dp_pct:.0f}% of vol, buy ratio {dp_buy_ratio:.2f}")
+                if dp_pct > 45 and dp_buy_ratio < 0.45:
+                    return _vote(self.name, self.emoji, "BUY_PUT", 68,
+                                 f"DP {dp_pct:.0f}% of vol, sell ratio {1-dp_buy_ratio:.2f}")
+            # Heuristic proxy: tight range + above-avg volume = institutional accumulation
+            highs = df["High"].values.astype(float)
+            lows = df["Low"].values.astype(float)
+            closes = df["Close"].values.astype(float)
+            if len(closes) < 10:
+                return _hold(self.name, self.emoji, "Insufficient bars")
+            atr = float(ind.get("atr14") or 0)
+            price = float(closes[-1])
+            today_range = highs[-1] - lows[-1]
+            avg_range = float(np.mean(highs[-10:] - lows[-10:]))
+            rv = float(ind.get("rel_volume") or 1)
+            # Tight range + high vol + close in upper third = stealth buying
+            close_pos = (closes[-1] - lows[-1]) / max(highs[-1] - lows[-1], 1e-6)
+            if today_range < avg_range * 0.7 and rv > 1.4 and close_pos > 0.65:
+                return _vote(self.name, self.emoji, "BUY_CALL", 60,
+                             f"Tight range + {rv:.1f}×vol + close upper — accumulation proxy")
+            if today_range < avg_range * 0.7 and rv > 1.4 and close_pos < 0.35:
+                return _vote(self.name, self.emoji, "BUY_PUT", 60,
+                             f"Tight range + {rv:.1f}×vol + close lower — distribution proxy")
+            return _hold(self.name, self.emoji, "No institutional footprint")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 29. ETF FLOW AGENT ─────────────────────────────────────────────────────
+class ETFFlowAgent:
+    name = "ETF Flow Agent"
+    emoji = "💸"
+    method = "Sector ETF strength vs symbol — flow divergence detection"
+
+    SECTOR_ETF = {
+        "technology": "XLK", "communication services": "XLC",
+        "consumer cyclical": "XLY", "consumer defensive": "XLP",
+        "financial services": "XLF", "energy": "XLE",
+        "healthcare": "XLV", "industrials": "XLI",
+        "real estate": "XLRE", "utilities": "XLU",
+        "basic materials": "XLB",
+    }
+
+    def analyze(self, df, ind):
+        try:
+            sr = ind.get("sector_rotation") or {}
+            info = ind.get("_info") or {}
+            sector = (info.get("sector") or "").lower()
+            etf = self.SECTOR_ETF.get(sector)
+            if not etf:
+                return _hold(self.name, self.emoji, "Unknown sector")
+            etf_chg = float(sr.get(f"{etf.lower()}_change_5d") or 0)
+            sym_chg = float(ind.get("change_5d") or 0)
+            spread = sym_chg - etf_chg
+
+            # Symbol leading its sector → relative strength
+            if spread > 2.0 and etf_chg > 0:
+                return _vote(self.name, self.emoji, "BUY_CALL", 64,
+                             f"Leading {etf}: stock {sym_chg:+.1f}% vs sector {etf_chg:+.1f}%")
+            if spread < -2.0 and etf_chg < 0:
+                return _vote(self.name, self.emoji, "BUY_PUT", 62,
+                             f"Lagging {etf}: stock {sym_chg:+.1f}% vs sector {etf_chg:+.1f}%")
+            # Divergence: stock moving opposite to sector — likely to revert
+            if spread > 3.0 and etf_chg < -1.0:
+                return _vote(self.name, self.emoji, "BUY_PUT", 58,
+                             f"Stock decoupling +{spread:.1f}% above weak {etf} — revert risk")
+            if spread < -3.0 and etf_chg > 1.0:
+                return _vote(self.name, self.emoji, "BUY_CALL", 58,
+                             f"Stock lagging {spread:.1f}% behind strong {etf} — catch-up")
+            return _hold(self.name, self.emoji, f"In line with {etf} ({spread:+.1f}% spread)")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─── 30. ORDER FLOW IMBALANCE AGENT ─────────────────────────────────────────
+class OrderFlowImbalanceAgent:
+    name = "Order Flow Imbalance Agent"
+    emoji = "⚡"
+    method = "Bid/ask pressure proxy from intrabar close position + volume"
+
+    def analyze(self, df, ind):
+        try:
+            highs = df["High"].values.astype(float)
+            lows = df["Low"].values.astype(float)
+            closes = df["Close"].values.astype(float)
+            opens = df["Open"].values.astype(float)
+            vols = df["Volume"].values.astype(float)
+            n = len(closes)
+            if n < 20:
+                return _hold(self.name, self.emoji, "Insufficient bars")
+
+            # Build a simple "buy pressure" series:
+            # close in upper half of bar = net buying, lower half = net selling
+            # Weighted by volume
+            window = 10
+            buy_vol = 0.0
+            sell_vol = 0.0
+            for i in range(n - window, n):
+                rng = max(highs[i] - lows[i], 1e-6)
+                close_pos = (closes[i] - lows[i]) / rng  # 0..1
+                buy_vol += vols[i] * close_pos
+                sell_vol += vols[i] * (1 - close_pos)
+            total = buy_vol + sell_vol
+            if total <= 0:
+                return _hold(self.name, self.emoji, "No volume")
+            buy_pct = buy_vol / total
+
+            # Tick-direction proxy: net up-closes vs down-closes
+            up_ticks = sum(1 for i in range(n - window, n) if closes[i] > opens[i])
+            dn_ticks = sum(1 for i in range(n - window, n) if closes[i] < opens[i])
+
+            if buy_pct >= 0.62 and up_ticks > dn_ticks + 2:
+                conf = min(72, 55 + (buy_pct - 0.5) * 60)
+                return _vote(self.name, self.emoji, "BUY_CALL", conf,
+                             f"OFI bullish: {buy_pct:.0%} buy pressure, {up_ticks}u/{dn_ticks}d")
+            if buy_pct <= 0.38 and dn_ticks > up_ticks + 2:
+                conf = min(72, 55 + (0.5 - buy_pct) * 60)
+                return _vote(self.name, self.emoji, "BUY_PUT", conf,
+                             f"OFI bearish: {1-buy_pct:.0%} sell pressure, {dn_ticks}d/{up_ticks}u")
+            return _hold(self.name, self.emoji, f"Balanced OFI ({buy_pct:.0%})")
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# JUDGE AGENT  (fires at horizon's THRESHOLD — default 7/12 = 58% in v7.0)
+# JUDGE AGENT  (fires at horizon's THRESHOLD — default 17/30 = 57% in v7.1)
 # ─────────────────────────────────────────────────────────────────────────────
 class JudgeAgent:
     name = "Judge Agent"
     emoji = "⚖️"
-    THRESHOLD = 7  # out of 12 analysts (v7.0 — default; horizons override)
+    THRESHOLD = 17  # out of 30 analysts (v7.1 — default; horizons override)
 
     def decide(self, votes: list, ind: dict) -> dict:
         price = ind.get("price", 0)
@@ -2172,7 +3000,11 @@ class JudgeAgent:
         #   keeps quality high — and ALL downstream gates (pillar score,
         #   conviction-dominance ≥1.20×, ADX chop, weekly counter-trend,
         #   overextension, earnings) still apply, so weak setups still HOLD.
-        soft_threshold = max(4, threshold - 1)
+        # v7.1: with 30 agents (vs 12) and several Tier-1/2/3 agents that
+        # legitimately HOLD when their data source isn't wired, the soft tier
+        # uses threshold-3 to maintain the original "consensus minus a
+        # couple abstainers" intent. Still gated by 3:1 directional dominance.
+        soft_threshold = max(4, threshold - 3)
         soft_call = (
             call_count >= soft_threshold
             and (put_count == 0 or call_count >= 3 * put_count)
@@ -2663,6 +3495,7 @@ class JudgeAgent:
             # v7.0: 6 categories now (added "rotation" for Sector RS, "macro"
             # for Market Regime). Bonus scale extended for the 6th category.
             AGENT_CATEGORY = {
+                # Original 12
                 "Price Action Agent": "trend",
                 "Technical Agent": "trend",
                 "Momentum Agent": "trend",
@@ -2675,6 +3508,25 @@ class JudgeAgent:
                 "ML Agent": "ml",
                 "Sector RS Agent": "rotation",
                 "Market Regime Agent": "macro",
+                # v7.1.0 expansion (#13–30) mapped onto the same 6 categories
+                "Earnings Calendar Agent": "macro",
+                "Insider Trading Agent": "fundamental",
+                "Short Interest Agent": "flow",
+                "Options Skew Agent": "flow",
+                "Macro Events Agent": "macro",
+                "Correlation Agent": "rotation",
+                "Analyst Ratings Agent": "fundamental",
+                "Social Sentiment Agent": "sentiment",
+                "Search Trends Agent": "sentiment",
+                "Yield Curve Agent": "macro",
+                "Volume Profile Agent": "flow",
+                "Market Internals Agent": "macro",
+                "Volatility Regime Agent": "macro",
+                "Multi-TF Confluence Agent": "trend",
+                "Seasonality Agent": "meanrev",
+                "Dark Pool Activity Agent": "flow",
+                "ETF Flow Agent": "rotation",
+                "Order Flow Imbalance Agent": "flow",
             }
             cats_agree = {AGENT_CATEGORY.get(v["agent"], "other")
                           for v in votes if v["vote"] == signal}
