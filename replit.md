@@ -1,3 +1,78 @@
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.2
+
+## v7.1.2 — Round-2 dead-read sweep (3 more agents wired + earnings key-bug fix)
+After v7.1.1 lit up 5 agents, a systematic audit (cross-referenced every
+`ind.get(...)` key in agents.py against everything populated in server.py and
+indicators.py) surfaced **7 more dead reads** — agent code looking for keys
+that nothing ever wrote, so those agents always returned `None` and HOLDed.
+
+**The audit method (saved as a one-liner so we can re-run it):**
+```
+diff <(rg -No 'ind\.get\("[a-zA-Z_0-9]+"' agents.py | sort -u) \
+     <(rg -No '"[a-z_0-9]+":' indicators.py; rg -No 'ind\["[a-z_]+"\]' server.py)
+```
+Found: `dark_pool`, `social_sentiment`, `google_trends`, `options_chain`,
+`options_data`, `rs_score`, `rsi`. Of these, `dark_pool` and
+`social_sentiment` have no good free data source (need paid FINRA ATS feeds
+or scraped Reddit/Twitter), so they stay dormant for now. `rsi` is a
+fallback alias for `rsi14`, no fix needed. The other 4 are fixed below.
+
+**Bug A — EarningsCalendarAgent fully broken (CRITICAL):**
+The agent reads `er.get("days_to_earnings")`, `er.get("days_since_earnings")`,
+and `er.get("last_earnings_move_pct")`. The `_earnings_proximity()` helper
+only ever wrote `days_until` / `in_danger` / `in_caution` / `date`. Keys
+never matched → AAPL with earnings in 3 days reported "No earnings calendar
+data". Fixed by:
+- Adding `days_to_earnings` (int form of `days_until`) to the result dict
+- Adding a SECOND lookup that finds the most recent PAST earnings via
+  `ticker.earnings_dates`, computes `days_since_earnings`, and computes
+  `last_earnings_move_pct` by matching the announcement date against daily
+  history and taking the next bar's close-vs-prev-close % change.
+After the fix, AAPL swing now reports: "Pre-earnings drift window (3d),
+uptrend confirms" → BUY_CALL 60.
+
+**Wire B — `_options_chain(sym)` helper for OptionsSkewAgent:**
+Pulls free options data via `ticker.option_chain(date)`. Picks the first
+expiry ≥7 days out (skipping 0DTE noise where a single trade can spike IV).
+At that expiry: finds the strike closest to spot, reads ATM call IV and put
+IV from those single contracts, then sums total call/put volume across the
+whole chain for the put/call ratio. Returns
+`{put_iv_atm, call_iv_atm, put_call_ratio, expiry}`. Cached 30 min.
+After wiring, AAPL swing reports: "Neutral skew 0.98" — real put/call IV.
+
+**Wire C — `_google_trends(sym)` helper for GoogleTrendsAgent:**
+Installed `pytrends` (free Google Trends Python client). Queries the
+symbol verbatim with `timeframe="today 1-m", geo="US"`. Computes
+`interest_now` as the last 3-day mean (smooths single-day spike noise) and
+`interest_30d_avg` from the rest of the window. Cached 12 h because pytrends
+is heavily rate-limited — one bad call can throttle the IP for hours, and
+trends data only updates daily anyway. Errors are swallowed (returns zeros)
+so a rate-limited fetch makes the agent HOLD instead of crashing the whole
+analysis. After wiring, AAPL swing reports: "Search interest collapsed
+(0.56× of avg)" → BUY_PUT 55.
+
+**Wire D — `_relative_strength(sym, ind)` helper for `rs_score`:**
+This was the biggest hidden problem. `rs_score` is read by:
+1. **JudgeAgent's pillar score** at agents.py:1456 → `rs_feat = math.tanh(rs_score / 4.0)`
+2. **RelativeStrengthAgent**
+Both have been getting `0.0` for the entire history of v7.x. That means the
+JudgeAgent's pillar score has been silently underweighting "is this stock
+beating SPY" by a full feature dimension on every signal. Fix: stock's 5-day
+% change minus SPY's 5-day % change (both already cached in `ind`). For SPY
+itself returns 0 (vs-self is undefined). Free, zero extra HTTP calls.
+
+**Smoke verification — multi-symbol stress (40 calls, 10 syms × 4 horizons):**
+- 0 crashes, 0 timeouts
+- Average **6.7 of 8** newly-wired agents have real data per call (was 0/8)
+- Liquid names (MSFT/META/NVDA/AAPL/TSLA): 7/8 real
+- ETF (SPY): 5/8 (correctly skips insider/analyst/earnings — no such data)
+- Strong signals preserved: META swing 81.4, MSFT day 75.2, SPY swing 75.1,
+  AMD swing 70.5 (unchanged from v7.1.1 → no regressions)
+- AAPL Earnings agent now FIRES BUY_CALL 60 at "3d pre-earnings + uptrend"
+  (was always HOLD before)
+- TSLA earnings agent correctly reports "Outside earnings window (86d)" —
+  the new past-earnings tracker working too
+
 # TradeSignal AI — 30-Agent Trading Prediction System v7.1.1
 
 ## v7.1.1 — Wire dormant Tier-1 agents to free public data + Judge quality gate

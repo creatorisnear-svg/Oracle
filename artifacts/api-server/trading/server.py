@@ -724,14 +724,188 @@ def _earnings_proximity(sym: str) -> dict:
             if days >= -1:  # ignore long-past dates
                 result = {
                     "days_until": round(days, 1),
+                    # v7.1.2 BUG FIX: EarningsCalendarAgent reads `days_to_earnings`
+                    # (and `days_since_earnings`, `last_earnings_move_pct`). The
+                    # helper only ever wrote `days_until` — the agent ALWAYS said
+                    # "No earnings calendar data". Now we write both naming
+                    # conventions so the agent's pre-/post-earnings drift logic
+                    # actually fires.
+                    "days_to_earnings": int(round(days)),
                     "in_danger": 0 <= days <= 2,
                     "in_caution": 0 <= days <= 5,
                     "date": next_dt.strftime("%Y-%m-%d"),
                 }
+
+        # v7.1.2: post-earnings drift — find the most recent PAST earnings date
+        # and tag days_since + the realized 1-day move on the announcement.
+        # The agent rides established post-earnings momentum (1-5 days after).
+        try:
+            edf = ticker.earnings_dates
+            if edf is not None and not edf.empty:
+                now_utc = _dt.datetime.now(_dt.timezone.utc)
+                past = []
+                for d in edf.index:
+                    coerced = _coerce_to_utc_dt(d)
+                    if coerced is not None and coerced < now_utc:
+                        past.append(coerced)
+                if past:
+                    last_dt = max(past)
+                    days_since = (now_utc - last_dt).total_seconds() / 86400.0
+                    if 0 <= days_since <= 30:
+                        result["days_since_earnings"] = int(round(days_since))
+                        # Find the announcement-day price move using daily history
+                        try:
+                            hist = ticker.history(period="2mo", interval="1d")
+                            # Match the bar at-or-just-after the announcement
+                            ev_date = last_dt.date()
+                            move = 0.0
+                            dates = list(hist.index)
+                            for i, ts in enumerate(dates):
+                                if hasattr(ts, "date") and ts.date() >= ev_date and i > 0:
+                                    prev_close = float(hist["Close"].iloc[i-1])
+                                    cur_close = float(hist["Close"].iloc[i])
+                                    if prev_close > 0:
+                                        move = (cur_close - prev_close) / prev_close * 100
+                                    break
+                            result["last_earnings_move_pct"] = round(move, 2)
+                        except Exception:
+                            result["last_earnings_move_pct"] = 0.0
+        except Exception:
+            pass
     except Exception as e:
         logger.debug(f"earnings proximity {sym}: {e}")
     _DF_CACHE[key] = (result, None, time.time())
     return result
+
+
+def _options_chain(sym: str) -> dict:
+    """ATM IV skew + put/call volume ratio from yfinance free options chain.
+    Cached 30 min — IV doesn't move much intraday between agent runs.
+
+    Returns the shape OptionsSkewAgent expects:
+      {put_iv_atm, call_iv_atm, put_call_ratio, expiry}.
+    Uses the first weekly expiration ≥7 days out so we don't pick up the
+    noisy 0DTE that can have synthetic IV spikes from a single trade."""
+    key = (sym.upper(), "_options_chain")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 1800:
+        return cached[0]
+
+    result = {"put_iv_atm": 0.0, "call_iv_atm": 0.0, "put_call_ratio": 0.0, "expiry": ""}
+    try:
+        import datetime as _dt
+        ticker = yf.Ticker(sym)
+        expirations = list(ticker.options or [])
+        if not expirations:
+            _DF_CACHE[key] = (result, None, time.time())
+            return result
+
+        # Pick the first expiry ≥7 days out — skip 0DTE/weekly noise
+        today = _dt.date.today()
+        target_expiry = None
+        for exp_str in expirations:
+            try:
+                exp_d = _dt.datetime.strptime(exp_str, "%Y-%m-%d").date()
+                if (exp_d - today).days >= 7:
+                    target_expiry = exp_str
+                    break
+            except Exception:
+                continue
+        if target_expiry is None:
+            target_expiry = expirations[0]
+
+        chain = ticker.option_chain(target_expiry)
+        calls, puts = chain.calls, chain.puts
+        if calls is None or puts is None or calls.empty or puts.empty:
+            _DF_CACHE[key] = (result, None, time.time())
+            return result
+
+        # Spot price for ATM lookup (use last close, not delayed quote)
+        spot = float(ticker.history(period="2d", interval="1d")["Close"].iloc[-1])
+
+        # ATM = strike closest to spot. Take the IV from that single contract.
+        c_atm_idx = (calls["strike"] - spot).abs().idxmin()
+        p_atm_idx = (puts["strike"] - spot).abs().idxmin()
+        call_iv = float(calls.loc[c_atm_idx, "impliedVolatility"] or 0)
+        put_iv = float(puts.loc[p_atm_idx, "impliedVolatility"] or 0)
+
+        # Put/call volume ratio across the whole chain (not just ATM) — broader
+        # signal of bearish/bullish positioning. Filter NaN volume to 0.
+        call_vol = float(calls["volume"].fillna(0).sum())
+        put_vol = float(puts["volume"].fillna(0).sum())
+        pcr = (put_vol / call_vol) if call_vol > 0 else 0.0
+
+        result = {
+            "put_iv_atm": round(put_iv, 4),
+            "call_iv_atm": round(call_iv, 4),
+            "put_call_ratio": round(pcr, 3),
+            "expiry": target_expiry,
+        }
+    except Exception as e:
+        result["_error"] = str(e)
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _google_trends(sym: str) -> dict:
+    """Search interest from Google Trends via free pytrends library.
+    Cached 12 h — Trends data is daily and rate-limited (one bad call can
+    get the IP throttled for hours), so we cache aggressively.
+
+    Returns the shape GoogleTrendsAgent expects:
+      {interest_now, interest_30d_avg}.
+    Uses the symbol verbatim (e.g. "AAPL"). For broad-name tickers like
+    "F" or "T" this could pick up noise; cleaner solution would be to map
+    symbol → company name, but the agent's ratio logic still works because
+    the noise is constant across the lookback window."""
+    key = (sym.upper(), "_google_trends")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 43200:
+        return cached[0]
+
+    result = {"interest_now": 0, "interest_30d_avg": 0}
+    try:
+        from pytrends.request import TrendReq
+        pytrends = TrendReq(hl="en-US", tz=360, timeout=(5, 10))
+        pytrends.build_payload([sym.upper()], timeframe="today 1-m", geo="US")
+        df = pytrends.interest_over_time()
+        if df is not None and not df.empty and sym.upper() in df.columns:
+            series = df[sym.upper()].astype(float)
+            # interest_now = last 3 days average (reduces single-day spike noise)
+            now_window = series.tail(3)
+            avg_window = series.head(max(1, len(series) - 3))
+            if len(now_window) > 0 and len(avg_window) > 0:
+                result = {
+                    "interest_now": round(float(now_window.mean()), 1),
+                    "interest_30d_avg": round(float(avg_window.mean()), 1),
+                }
+    except Exception as e:
+        # Rate limits / network errors are NORMAL with pytrends. Don't crash,
+        # just return zeros so the agent cleanly HOLDs.
+        result["_error"] = str(e)[:80]
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _relative_strength(sym: str, ind: dict) -> float:
+    """Compute the symbol's 5-day relative strength vs SPY (= rs_score read by
+    JudgeAgent's pillar score AND by RelativeStrengthAgent). Positive = beating
+    SPY, negative = lagging. Free, derived from data we already cache.
+
+    JudgeAgent at agents.py uses `tanh(rs_score / 4.0)` so the natural unit is
+    "percentage points of 5-day excess return" — ±4% saturates the feature.
+    Cheap to compute since spy_trend already has change_5d cached."""
+    try:
+        # Stock 5d change from indicators dict (already computed)
+        stock_chg5 = float(ind.get("change_5d") or 0.0)
+        # SPY 5d change is in spy_trend (or self if symbol IS SPY)
+        spy_trend = ind.get("spy_trend") or {}
+        if spy_trend.get("dir") == "self":
+            return 0.0  # SPY vs itself = 0 by definition
+        spy_chg5 = float(spy_trend.get("change_5d") or 0.0)
+        return round(stock_chg5 - spy_chg5, 3)
+    except Exception:
+        return 0.0
 
 
 def _short_squeeze_score(sym: str, ind: dict) -> dict:
@@ -822,6 +996,13 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
     ind["yield_curve"] = _yield_curve()
     ind["analyst_ratings"] = _analyst_ratings(sym, info=info)
     ind["insider_activity"] = _insider_activity(sym)
+    # v7.1.2: wire 3 more dormant agents + the JudgeAgent rs_feat input
+    ind["options_chain"] = _options_chain(sym)
+    ind["google_trends"] = _google_trends(sym)
+    # rs_score is read by JudgeAgent's pillar-score AND RelativeStrengthAgent.
+    # Was always 0 because nothing populated it → Judge underweighted relative
+    # strength on every signal for the entire history of v7.x.
+    ind["rs_score"] = _relative_strength(sym, ind)
     weights = LEARNING.get_weights()
 
     # Meta-learning multipliers (per regime + per symbol + per horizon).
@@ -973,7 +1154,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.1.1-data-wired"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.1.2-data-wired-r2"}
 
 
 @app.get("/api/ml-stats")
