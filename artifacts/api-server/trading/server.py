@@ -1,8 +1,9 @@
 """
-TradeSignal AI — FastAPI backend v4
-9 Agents: PriceAction, Technical, Volume, Sentiment, OptionsFlow, Momentum,
-          Risk, FearGreed, Political  +  Judge (fires at 6/9 consensus)
-New: /api/fear-greed  /api/political-news  /api/accuracy  /api/accuracy/{symbol}
+TradeSignal AI — FastAPI backend v6.7
+10 Agents: PriceAction, Technical, Volume, Sentiment, OptionsFlow, Momentum,
+          Risk, FearGreed, Political, ML  +  Judge (fires at 6/10 consensus)
+Endpoints: /api/fear-greed  /api/political-news  /api/accuracy
+           /api/accuracy/{symbol}  /api/ml-stats
 """
 import asyncio
 import concurrent.futures
@@ -755,7 +756,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "6.7-10agents"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "6.8-weight-aware-judge"}
 
 
 @app.get("/api/ml-stats")
@@ -1044,7 +1045,7 @@ def accuracy_report():
     try:
         report = LEARNING.get_accuracy_report()
         agent_methods = {a.name: getattr(a, "method", "") for a in AGENTS}
-        agent_methods[JUDGE.name] = "5/9 consensus threshold — fires CALL/PUT only on majority agreement"
+        agent_methods[JUDGE.name] = "6/10 consensus threshold (60%) — fires CALL/PUT only on majority agreement, then weight-veto + overextension/earnings filters"
         return {
             "status": "ok",
             "report": report,
@@ -1207,7 +1208,7 @@ def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
         raw_judgment = meta_judge.apply_meta_judge(raw_judgment, votes)
 
         # Signal stickiness — keep an open trade plan locked unless target/stop
-        # hit, the hold window elapsed, or a strong reversal fires (≥6/9).
+        # hit, the hold window elapsed, or a strong reversal fires (≥7/10).
         active = get_active_trade(sym, h["key"])
         judgment, should_save = apply_persistence(raw_judgment, active)
 
@@ -1487,7 +1488,7 @@ def admin_learn_status():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WEBSOCKET — 9-agent live analysis + live price streaming every 3s
+# WEBSOCKET — 10-agent live analysis + live price streaming every 3s
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.websocket("/api/ws/analyze/{symbol}")
@@ -1552,7 +1553,7 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
 
         await websocket.send_text(json.dumps({
             "type": "status",
-            "message": "🤖 All 9 agents running in parallel..."
+            "message": "🤖 All 10 agents running in parallel..."
         }))
 
         # 4. Run all agents in parallel, then send all votes + judgment in one message

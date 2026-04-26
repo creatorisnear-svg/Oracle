@@ -1,12 +1,14 @@
 """
-9 Trading Prediction Agents + Judge  (v4 — Full Indicator Suite)
+10 Trading Prediction Agents + Judge  (v6.7 — Full Indicator + ML Suite)
 Signals: BUY_CALL | BUY_PUT | HOLD
 Agents: Price Action, Technical, Volume, Sentiment, Options Flow, Momentum,
-        Risk, Fear & Greed, Political.
-Judge fires at the horizon's THRESHOLD (5/9 default; intraday/day stricter via
-pillar floor — see HORIZONS dict). 5/9 = 56% agreement; the conviction-
-dominance, evidence-pillar, ADX-chop, weekly/SPY/HTF tilt, earnings veto and
-overextension gates do the additional filtering.
+        Risk, Fear & Greed, Political, ML.
+Judge fires at the horizon's THRESHOLD (6/10 default = 60%; intraday/day
+stricter via pillar floor — see HORIZONS dict). The conviction-dominance
+veto (now WEIGHT-AWARE — multiplies confidence by each agent's learned
+reliability), evidence-pillar floor, ADX-chop filter, weekly/SPY/HTF tilt,
+earnings veto, volume-divergence penalty and overextension gates do the
+additional filtering on top of the raw consensus.
 """
 import os
 import math
@@ -70,11 +72,10 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 5,
         "target_hit_bars": 24,      # 2 hours
         "stop_mult": 0.7, "tgt_mult": 0.9,
-        # Threshold = 6/10 (60%). Bumped from 5/9 → 6/10 with the addition of
-        # the ML Agent (v6.7) so the consensus bar stays at ~60% — the
-        # stricter min_pillar_score=1.5 still provides extra rigor for
-        # noisy intraday bars. (Original 6/9 was too strict and produced
-        # 100% HOLD; 6/10 ≈ 5/9 in difficulty.)
+        # Threshold = 6/10 (60%). Bumped from 5/9 → 6/10 with the v6.7
+        # addition of the ML Agent so the consensus bar stays at ~60% —
+        # the stricter min_pillar_score=1.5 still provides extra rigor
+        # for noisy intraday bars. (6/10 ≈ 5/9 in difficulty.)
         "threshold": 6,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",  # confirm with hourly trend
@@ -1758,7 +1759,7 @@ def compute_target_hit_probability(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JUDGE AGENT  (fires at horizon's THRESHOLD — default 5/9 = 56%)
+# JUDGE AGENT  (fires at horizon's THRESHOLD — default 6/10 = 60%)
 # ─────────────────────────────────────────────────────────────────────────────
 class JudgeAgent:
     name = "Judge Agent"
@@ -1794,11 +1795,23 @@ class JudgeAgent:
         hold_count = sum(1 for v in votes if v["vote"] == "HOLD")
         total_analysts = len(votes)
 
-        # ── Conviction-weighted score ───────────────────────────────
-        # A 90%-confident BUY_CALL counts more than a barely-bullish 55% one.
-        # We require the winning camp to dominate by both COUNT *and* WEIGHT.
-        bull_weight = float(sum(v.get("confidence", 50) for v in votes if v["vote"] == "BUY_CALL"))
-        bear_weight = float(sum(v.get("confidence", 50) for v in votes if v["vote"] == "BUY_PUT"))
+        # ── Conviction-weighted score (WEIGHT-AWARE in v6.8) ────────
+        # A 90%-confident BUY_CALL counts more than a barely-bullish 55% one,
+        # AND a vote from a historically-accurate agent counts more than a
+        # vote from a poorly-performing one. Each agent's vote carries a
+        # learned reliability `weight` (base × regime × symbol × horizon)
+        # attached upstream by server.py — default 1.0 when no learning data.
+        # We require the winning camp to dominate by both COUNT *and* this
+        # weight-adjusted conviction. This ties the existing per-agent
+        # learning loop directly into the signal-firing decision.
+        bull_weight = float(sum(
+            v.get("confidence", 50) * v.get("weight", 1.0)
+            for v in votes if v["vote"] == "BUY_CALL"
+        ))
+        bear_weight = float(sum(
+            v.get("confidence", 50) * v.get("weight", 1.0)
+            for v in votes if v["vote"] == "BUY_PUT"
+        ))
         # NOTE: the conviction-dominance veto below uses bull_weight/bear_weight
         # directly. The Risk Agent's vote is already included in `votes` and
         # therefore in the bull/bear weight totals — no separate gate needed.
@@ -2041,6 +2054,30 @@ class JudgeAgent:
                     # Aligned with VWAP — small honest boost
                     conf *= 1.04
 
+        # 7) ML-disagreement penalty (v6.8) ──────────────────────────────
+        # The ML Agent integrates 12 indicator features into a single
+        # P(up) via logistic regression. Unlike the rule-based agents
+        # (each looking at one slice), the ML output captures *interactions*
+        # between features. When ML votes the OPPOSITE direction from the
+        # chosen consensus, that's a meaningful doubt signal — the
+        # multi-feature combination doesn't support the trade even though
+        # individual rule-based agents do. Apply a confidence trim
+        # proportional to the strength of ML's opposing vote (its own
+        # confidence). Symmetric BOOST when ML strongly agrees.
+        if signal != "HOLD":
+            ml_vote = next((v for v in votes if v.get("agent") == "ML Agent"), None)
+            if ml_vote and ml_vote.get("vote") in ("BUY_CALL", "BUY_PUT"):
+                ml_dir = ml_vote["vote"]
+                ml_conf = float(ml_vote.get("confidence", 50))
+                # Strength factor: 0.0 at 50% conf, 1.0 at 95% conf
+                strength = max(0.0, min(1.0, (ml_conf - 50.0) / 45.0))
+                if ml_dir != signal:
+                    # Disagreement: trim 4–12% based on ML's own conviction.
+                    conf *= 1.0 - (0.04 + 0.08 * strength)
+                else:
+                    # Strong agreement: small honest boost (3–6%).
+                    conf *= 1.0 + (0.03 + 0.03 * strength)
+
         # ── Post-veto cleanup: any veto above flipped signal to HOLD,
         # but `agreed`/`disagreed` still reflect the pre-veto vote, so the
         # UI was showing "BUY_CALL agreed by 6 agents" alongside signal=HOLD.
@@ -2132,7 +2169,7 @@ class JudgeAgent:
             # 3.0+ → full confidence (well-supported)
 
         # Consensus strength: the more dissenting agents, the lower the conviction.
-        # 9/9 agree → 1.00x; 5/9 → 0.75x.
+        # 10/10 agree → 1.00x; 6/10 → 0.82x.
         if signal != "HOLD" and total_analysts > 0:
             agree_n = call_count if signal == "BUY_CALL" else put_count
             consensus_factor = 0.55 + 0.45 * (agree_n / total_analysts)

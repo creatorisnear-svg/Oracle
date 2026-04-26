@@ -3,7 +3,7 @@ Meta-Learning Layer
 ───────────────────
 This is where the model "learns more" and "creates its own methods".
 
-What it does (all on top of the existing 9-agent system):
+What it does (all on top of the existing 10-agent system):
 
 1. INDICATOR SNAPSHOT LOG
    Every prediction now stores a compact snapshot of the indicator state

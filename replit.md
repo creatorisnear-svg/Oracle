@@ -1,4 +1,55 @@
-# TradeSignal AI — 10-Agent Trading Prediction System v6.7
+# TradeSignal AI — 10-Agent Trading Prediction System v6.8
+
+## v6.8 — Weight-aware Judge + ML-disagreement penalty + bug sweep
+A focused accuracy + correctness pass on top of v6.7. **Files touched:**
+`agents.py`, `server.py`, `signal_persistence.py`, `indicators.py`,
+`learning.py`, `meta_learning.py`, `mockups/TradingDashboard.tsx`.
+
+**Accuracy improvements:**
+1. **Weight-aware conviction-dominance veto** (`agents.py` JudgeAgent
+   line ~1810). The bull/bear conviction sums now multiply each agent's
+   raw confidence by its learned `weight` (base × regime × symbol ×
+   horizon — already attached upstream by `server.py`). Previously the
+   1.25× dominance gate ignored learning entirely. A historically-
+   accurate agent now counts proportionally more in the firing decision,
+   which directly couples the existing per-agent learning loop to signal
+   generation. Default weight 1.0 → no behaviour change for cold-start
+   agents.
+2. **ML-disagreement penalty** (`agents.py` line ~2060). When the
+   MLAgent (10th agent — multi-feature logistic-regression integrator)
+   votes opposite to the chosen consensus signal, apply a 4–12% confidence
+   trim scaled by ML's own conviction strength. Symmetric 3–6% boost on
+   strong agreement. Rationale: ML captures feature *interactions* that
+   single-indicator rule-based agents miss, so its dissent is informative.
+3. **STRONG_REVERSAL_VOTES bumped 6 → 7** (`signal_persistence.py`).
+   With 10 agents the old "6 of 9 = 67%" flip threshold became "6 of 10
+   = 60%" which is identical to the firing threshold — the "STRONG"
+   reversal bar lost its meaning. Now 7/10 = 70% — a true majority
+   disagreement is required before flipping an open trade.
+
+**Bug fixes (stale 9-agent strings now showing wrong denominators):**
+- **Frontend vote tally** (`TradingDashboard.tsx` lines 1569-1571):
+  hard-coded `/9` denominator on CALL/PUT/HOLD stat tiles → `/10`.
+  This was the most user-visible bug — tally would show e.g. "7/9"
+  when there were actually 10 agents voting.
+- `indicators.py:1446` entry_trigger string "5/9 agent consensus" →
+  "6/10 agent consensus".
+- `signal_persistence.py:166,183` runtime sticky messages updated.
+- `server.py:1050` agent_methods judge description "5/9 consensus" →
+  "6/10 consensus (60%)".
+- `server.py:1558` websocket status "All 9 agents" → "All 10 agents".
+- Header docstrings + comment updates across `server.py`, `agents.py`,
+  `learning.py`, `meta_learning.py`. Test/backtest scripts intentionally
+  left untouched (separate harness — flagged in scratchpad).
+
+**Verification (live):**
+- `/api/health` reports `agents=11` (10 + Judge) `version=6.8-weight-aware-judge`.
+- `/api/analyze/AAPL?horizon=swing` returns vote_tally `{CALL:4, PUT:2,
+  HOLD:4}` summing to 10. Each vote carries a `weight` field.
+- `/api/analyze/NVDA?horizon=swing` → BUY_CALL @ 55% (slightly more
+  cautious than v6.7's 60-65% — the new ML+weight gates are working).
+- Frontend header: "10-AGENT", empty state: "6 of 10 must agree".
+- Pattern markers (v6.6) still render on chart.
 
 ## v6.7 — ML Agent (online-learning logistic regression)
 Added the **10th agent**: `MLAgent` in agents.py — a self-contained logistic-

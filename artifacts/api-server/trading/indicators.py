@@ -1440,7 +1440,7 @@ def suggest_options(direction: str, price: float, atr: float, ind: dict,
         premium_est = 0.0
         delta_est = 0.0
         breakeven = price
-        entry_trigger = "No clear entry — wait for 5/9 agent consensus"
+        entry_trigger = "No clear entry — wait for 6/10 agent consensus"
         risk_note = "No position recommended. Mixed signals or choppy market."
 
     expiry = f"Weekly: {weekly}  |  2-Week: {biweekly}  |  Monthly: {monthly}"

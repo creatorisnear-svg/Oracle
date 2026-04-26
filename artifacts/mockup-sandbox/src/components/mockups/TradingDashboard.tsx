@@ -1563,9 +1563,9 @@ export default function TradingDashboard() {
                       )}
                     </div>
                     <div className="grid grid-cols-3 gap-2">
-                      <Stat label="CALL" value={`${judgment.vote_tally.BUY_CALL}/9`} color="text-emerald-400" />
-                      <Stat label="PUT" value={`${judgment.vote_tally.BUY_PUT}/9`} color="text-red-400" />
-                      <Stat label="HOLD" value={`${judgment.vote_tally.HOLD}/9`} color="text-slate-400" />
+                      <Stat label="CALL" value={`${judgment.vote_tally.BUY_CALL}/10`} color="text-emerald-400" />
+                      <Stat label="PUT" value={`${judgment.vote_tally.BUY_PUT}/10`} color="text-red-400" />
+                      <Stat label="HOLD" value={`${judgment.vote_tally.HOLD}/10`} color="text-slate-400" />
                     </div>
                     <div className={`rounded-xl border p-3 text-xs space-y-1.5 ${stj.bg} ${stj.border}`}>
                       <div className="flex justify-between"><span className="text-slate-400">Entry</span><span className="font-mono font-bold">${judgment.entry_price.toFixed(2)}</span></div>
