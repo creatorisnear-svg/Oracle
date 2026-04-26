@@ -1,4 +1,54 @@
-# TradeSignal AI — 30-Agent Trading Prediction System v7.1.2
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.3
+
+## v7.1.3 — Round-3 dead-data + over-strict-threshold sweep (5 more agents fixed)
+
+User-reported "some ais are not working". Investigated by dumping every
+agent's vote on AAPL/TSLA — 19 of 30 were returning the default 50/HOLD.
+Most were legitimately neutral on real data, but **5 had real bugs**:
+
+**Bug 1 (CRITICAL) — MarketInternalsAgent fully dead.**
+Reads `mr.get("sector_breadth")`, `sr.get("qqq_change_5d")`,
+`sr.get("iwm_change_5d")`, `sr.get("xlu_change_5d")`. None of those keys
+were ever populated — `_market_regime()` doesn't expose breadth, and
+`_sector_rotation()` returned `{leaders, laggards, all}` not flat keys. All
+4 inputs defaulted to 0 / 0.5 → always "Mixed internals (50% breadth)".
+
+**Bug 2 (CRITICAL) — ETFFlowAgent fully dead.** Reads
+`sr.get(f"{etf.lower()}_change_5d")` for any sector ETF. Same problem —
+flat keys never existed → always saw `etf_chg=0` → spread comparisons
+broken → always "in line +0% spread".
+
+**Fix for 1 & 2 — server.py `_sector_rotation()`:** Added flat per-ETF keys
+(`xlk_change_5d`, `xlf_change_5d`, … plus `spy_change_5d`, `qqq_change_5d`,
+`iwm_change_5d` from broad-market proxies), plus computed sector breadth
+(fraction of the 11 SPDRs green over 5d). Exposed as both `breadth` and
+`sector_breadth` for back-compat. MarketInternalsAgent updated to read
+breadth from the new location with fallback chain.
+
+**Bug 3 — AnalystRatingsAgent over-strict.** AAPL had rec_mean=1.89 (strong
+buy) with 40 analysts and a $297.70 target (+9.85% upside) — clearly
+actionable. But the agent demanded ≥12% target gap, so it HOLDed.
+**Fix:** Lowered target-gap threshold from 12% → 6% (consensus-positive
+side) and -8% → -5% (consensus-negative side). Added pure-consensus
+fallback: with ≥10 analysts, rec_mean ≤ 1.9 → BUY_CALL@56 and
+rec_mean ≥ 4.1 → BUY_PUT@56.
+
+**Bug 4 — MultiTimeframeConfluenceAgent over-strict.** With AAPL's
+`up=2, dn=0` (2 timeframes bullish, 2 neutral, 0 opposing) the agent
+returned "Mixed" — but 2-and-0-against is weakly bullish, not mixed.
+**Fix:** Added weak vote (conf 56) for `tf_up==2 and tf_dn==0` and
+mirror for the bear case.
+
+**Bug 5 — OrderFlowImbalanceAgent over-strict.** 55% buy pressure → HOLD
+because cutoff was 62%. **Fix:** Added a softer band: `buy_pct ≥ 0.55`
+with up-tick confirmation → BUY_CALL@55, mirrored for the bear case.
+
+**Verification (AAPL swing):** Before fixes — 7 BUY_CALL / 4 BUY_PUT /
+19 HOLD. After fixes — 9 BUY_CALL / 4 BUY_PUT / 17 HOLD. Two previously
+dead agents (MarketInternals, ETFFlow) now feed real data; on this
+particular tape MarketInternals still legitimately HOLDs at 46% breadth
+(5/11 sectors green is genuinely mixed) but is no longer stuck on the
+fallback default. Zero exceptions across all 30 agents on AAPL or TSLA.
 
 ## v7.1.2 — Round-2 dead-read sweep (3 more agents wired + earnings key-bug fix)
 After v7.1.1 lit up 5 agents, a systematic audit (cross-referenced every

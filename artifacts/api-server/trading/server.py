@@ -356,8 +356,13 @@ def _macro_basket() -> dict:
 
 
 def _sector_rotation() -> dict:
-    """5-day % change of the 11 SPDR sector ETFs. Tells you which sectors are leading.
-    Cached 10 min."""
+    """5-day % change of the 11 SPDR sector ETFs + SPY/QQQ/IWM breadth proxies.
+    Tells you which sectors are leading and computes overall sector breadth
+    (fraction of sectors green over 5d). Cached 10 min.
+
+    Returns flat per-ETF keys (e.g. xlk_change_5d) so agents can read them
+    without walking the `all` list, plus aggregate `breadth` and the
+    pre-existing `leaders/laggards/all` shape."""
     key = ("__MACRO__", "sectors")
     cached = _DF_CACHE.get(key)
     if cached and (time.time() - cached[2]) < 600:
@@ -369,22 +374,40 @@ def _sector_rotation() -> dict:
         "XLB": "Materials", "XLU": "Utilities",
         "XLRE": "Real Estate", "XLC": "Communications",
     }
+    # Also pull broad-market & size ETFs for risk-on/risk-off internals
+    breadth_proxies = {"SPY": "S&P 500", "QQQ": "Nasdaq 100", "IWM": "Russell 2000"}
+
     out = []
-    for sym, name in sectors.items():
+    flat = {}
+    for sym, name in {**sectors, **breadth_proxies}.items():
         try:
             d = yf.Ticker(sym).history(period="1mo", interval="1d")
             if d.empty or len(d) < 6:
                 continue
             closes = d["Close"].values
             chg5 = (closes[-1] - closes[-6]) / closes[-6] * 100
-            out.append({"symbol": sym, "name": name, "change_5d": round(float(chg5), 2)})
+            chg5 = round(float(chg5), 2)
+            flat[f"{sym.lower()}_change_5d"] = chg5
+            if sym in sectors:
+                out.append({"symbol": sym, "name": name, "change_5d": chg5})
         except Exception:
             continue
     out.sort(key=lambda x: -x["change_5d"])
+
+    # Sector breadth = fraction of the 11 SPDR sectors with positive 5d return
+    if out:
+        green = sum(1 for s in out if s["change_5d"] > 0)
+        breadth = round(green / len(out), 3)
+    else:
+        breadth = 0.5
+
     result = {
         "leaders": out[:3],
         "laggards": out[-3:],
         "all": out,
+        "breadth": breadth,
+        "sector_breadth": breadth,  # alias used by MarketInternalsAgent
+        **flat,                      # xlk_change_5d, xlf_change_5d, qqq_change_5d, …
     }
     _DF_CACHE[key] = (result, None, time.time())
     return result

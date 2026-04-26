@@ -2406,13 +2406,22 @@ class AnalystRatingsAgent:
             if down_30d - up_30d >= 3:
                 return _vote(self.name, self.emoji, "BUY_PUT", 63,
                              f"{down_30d} downgrades vs {up_30d} upgrades 30d")
-            # Strong target gap with positive consensus
-            if target_gap_pct >= 12 and rec_mean > 0 and rec_mean <= 2.3:
+            # Strong consensus + meaningful target upside (≥6%, lowered from 12%
+            # which was too strict for large-caps where targets cluster near price).
+            if target_gap_pct >= 6 and rec_mean > 0 and rec_mean <= 2.3:
                 return _vote(self.name, self.emoji, "BUY_CALL", 60,
-                             f"Target {target_gap_pct:+.1f}% above price, rec={rec_mean:.1f}")
-            if target_gap_pct <= -8 and rec_mean >= 3.3:
+                             f"Target {target_gap_pct:+.1f}% above price, rec={rec_mean:.1f} ({n_analysts} an)")
+            if target_gap_pct <= -5 and rec_mean >= 3.3:
                 return _vote(self.name, self.emoji, "BUY_PUT", 58,
-                             f"Target {target_gap_pct:.1f}% below price, rec={rec_mean:.1f}")
+                             f"Target {target_gap_pct:.1f}% below price, rec={rec_mean:.1f} ({n_analysts} an)")
+            # v7.1.3: Pure consensus signal — strong rec_mean alone is actionable
+            # when there are enough analysts (≥10) covering the name.
+            if n_analysts >= 10 and rec_mean > 0 and rec_mean <= 1.9:
+                return _vote(self.name, self.emoji, "BUY_CALL", 56,
+                             f"Strong-buy consensus rec={rec_mean:.2f} ({n_analysts} an, target {target_gap_pct:+.1f}%)")
+            if n_analysts >= 10 and rec_mean >= 4.1:
+                return _vote(self.name, self.emoji, "BUY_PUT", 56,
+                             f"Sell-rated consensus rec={rec_mean:.2f} ({n_analysts} an, target {target_gap_pct:+.1f}%)")
             return _hold(self.name, self.emoji, f"Neutral analyst stance ({n_analysts} an, rec={rec_mean:.1f})")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Error: {e}")
@@ -2609,10 +2618,20 @@ class MarketInternalsAgent:
         try:
             mr = ind.get("market_regime") or {}
             sr = ind.get("sector_rotation") or {}
-            breadth = float(mr.get("sector_breadth") or 0.5)  # 0-1, fraction green
+            # v7.1.3: breadth lives in sector_rotation (computed from the 11
+            # SPDR sectors). Fall back to market_regime for back-compat, then
+            # to 0.5 only as a last resort. The flat *_change_5d keys come
+            # from _sector_rotation()'s flat-key map.
+            breadth = float(
+                sr.get("sector_breadth")
+                or sr.get("breadth")
+                or mr.get("sector_breadth")
+                or 0.5
+            )
             qqq_chg = float(sr.get("qqq_change_5d") or 0)
             iwm_chg = float(sr.get("iwm_change_5d") or 0)
-            spy_chg = float((ind.get("spy_trend") or {}).get("change_5d") or 0)
+            spy_chg = float((ind.get("spy_trend") or {}).get("change_5d")
+                           or sr.get("spy_change_5d") or 0)
             xlu_chg = float(sr.get("xlu_change_5d") or 0)  # utilities = defensive
 
             # Risk-on: small caps leading (IWM > SPY > XLU)
@@ -2630,6 +2649,13 @@ class MarketInternalsAgent:
             if breadth < 0.30:
                 return _vote(self.name, self.emoji, "BUY_PUT", 58,
                              f"Broad weakness: only {breadth:.0%} sectors green")
+            # Soft tilt: tech leadership + balanced breadth → weak risk-on
+            if qqq_chg > spy_chg + 0.5 and breadth >= 0.50:
+                return _vote(self.name, self.emoji, "BUY_CALL", 55,
+                             f"Tech leadership: QQQ {qqq_chg:+.1f}% > SPY {spy_chg:+.1f}%, breadth {breadth:.0%}")
+            if xlu_chg > spy_chg + 0.5 and breadth <= 0.50:
+                return _vote(self.name, self.emoji, "BUY_PUT", 55,
+                             f"Defensive bid: XLU {xlu_chg:+.1f}% > SPY {spy_chg:+.1f}%, breadth {breadth:.0%}")
             return _hold(self.name, self.emoji, f"Mixed internals ({breadth:.0%} breadth)")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Error: {e}")
@@ -2718,9 +2744,14 @@ class MultiTimeframeConfluenceAgent:
                 return _vote(self.name, self.emoji, "BUY_PUT", 75,
                              "All 4 timeframes aligned bearish")
             if tf_up == 3 and tf_dn == 0:
-                return _vote(self.name, self.emoji, "BUY_CALL", 64, "3/4 timeframes bullish")
+                return _vote(self.name, self.emoji, "BUY_CALL", 64, "3/4 timeframes bullish, 0 bearish")
             if tf_dn == 3 and tf_up == 0:
-                return _vote(self.name, self.emoji, "BUY_PUT", 64, "3/4 timeframes bearish")
+                return _vote(self.name, self.emoji, "BUY_PUT", 64, "3/4 timeframes bearish, 0 bullish")
+            # v7.1.3: weak vote when 2 are aligned and none oppose (the rest neutral)
+            if tf_up == 2 and tf_dn == 0:
+                return _vote(self.name, self.emoji, "BUY_CALL", 56, "2/4 timeframes bullish, 0 bearish")
+            if tf_dn == 2 and tf_up == 0:
+                return _vote(self.name, self.emoji, "BUY_PUT", 56, "2/4 timeframes bearish, 0 bullish")
             return _hold(self.name, self.emoji, f"Mixed timeframes (up={tf_up}, dn={tf_dn})")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Error: {e}")
@@ -2909,6 +2940,13 @@ class OrderFlowImbalanceAgent:
                 conf = min(72, 55 + (0.5 - buy_pct) * 60)
                 return _vote(self.name, self.emoji, "BUY_PUT", conf,
                              f"OFI bearish: {1-buy_pct:.0%} sell pressure, {dn_ticks}d/{up_ticks}u")
+            # v7.1.3: weaker imbalance still tradeable when tick direction confirms
+            if buy_pct >= 0.55 and up_ticks >= dn_ticks + 2:
+                return _vote(self.name, self.emoji, "BUY_CALL", 55,
+                             f"OFI tilt bullish: {buy_pct:.0%} buy pressure, {up_ticks}u/{dn_ticks}d")
+            if buy_pct <= 0.45 and dn_ticks >= up_ticks + 2:
+                return _vote(self.name, self.emoji, "BUY_PUT", 55,
+                             f"OFI tilt bearish: {1-buy_pct:.0%} sell pressure, {dn_ticks}d/{up_ticks}u")
             return _hold(self.name, self.emoji, f"Balanced OFI ({buy_pct:.0%})")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Error: {e}")
