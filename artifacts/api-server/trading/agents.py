@@ -1,14 +1,24 @@
 """
-12 Trading Prediction Agents + Judge  (v7.0 — Sector-RS + Macro Regime added)
+12 Trading Prediction Agents + Judge  (v7.0.2 — soft-consensus tier added)
 Signals: BUY_CALL | BUY_PUT | HOLD
 Agents: Price Action, Technical, Volume, Sentiment, Options Flow, Momentum,
         Risk, Fear & Greed, Political, ML, Sector RS, Market Regime.
-Judge fires at the horizon's THRESHOLD (7/12 default ≈ 58%; intraday/day
-stricter via pillar floor — see HORIZONS dict). The conviction-dominance
-veto (WEIGHT-AWARE — multiplies confidence by each agent's learned
-reliability), evidence-pillar floor, ADX-chop filter, weekly/SPY/HTF tilt,
-earnings veto, agent-diversity bonus (now 6 categories), volume-divergence
-penalty and overextension gates do the additional filtering on top of the
+
+Judge fires at the horizon's THRESHOLD with two tiers:
+  • HARD tier   — winning side ≥ threshold (default 7/12 ≈ 58%)
+  • SOFT tier   — winning side ≥ threshold-1 AND directional dominance ≥ 3:1
+                  (handles the case where 4-6 agents abstain to HOLD,
+                  shrinking the directional vote pool to 6-8). Soft-fired
+                  signals carry a 12% confidence haircut and still must clear
+                  EVERY downstream gate (pillar score, conviction-dominance
+                  ≥1.20×, ADX-chop, weekly counter-trend, overextension,
+                  earnings) — so quality stays high while clean 6:2 setups
+                  no longer get vetoed by raw count alone.
+
+The conviction-dominance veto (WEIGHT-AWARE — multiplies confidence by each
+agent's learned reliability), evidence-pillar floor, ADX-chop filter,
+weekly/SPY/HTF tilt, earnings veto, agent-diversity bonus (6 categories),
+volume-divergence penalty and overextension gates all apply on top of the
 raw consensus.
 """
 import os
@@ -2148,6 +2158,31 @@ class JudgeAgent:
         stop_mult = round(0.6 * h_stop_mult + 0.4 * stop_mult, 3)
         tgt_mult = round(0.6 * h_tgt_mult + 0.4 * tgt_mult, 3)
 
+        # ── Consensus firing (HARD + SOFT tiers) ─────────────────────────
+        # HARD tier (original): the winning side must reach the horizon's
+        # raw count threshold (7/12 = 58%).
+        # SOFT tier (v7.0.2): when the winning side is just one short of the
+        # hard threshold (≥ threshold-1) AND directionally dominates the
+        # opposing side by 3:1 (or the opposing side has 0 votes), fire the
+        # signal anyway. This fixes a long-standing HOLD-bias bug:
+        #   With 12 agents, 4-6 typically vote HOLD on any given query, so
+        #   the directional pool is often only 6-8. A clean 6 CALL / 2 PUT
+        #   (= 75% of directional votes) was being vetoed even though it's
+        #   a textbook signal. The 3:1 dominance + threshold-1 floor still
+        #   keeps quality high — and ALL downstream gates (pillar score,
+        #   conviction-dominance ≥1.20×, ADX chop, weekly counter-trend,
+        #   overextension, earnings) still apply, so weak setups still HOLD.
+        soft_threshold = max(4, threshold - 1)
+        soft_call = (
+            call_count >= soft_threshold
+            and (put_count == 0 or call_count >= 3 * put_count)
+        )
+        soft_put = (
+            put_count >= soft_threshold
+            and (call_count == 0 or put_count >= 3 * call_count)
+        )
+        soft_fire_used = False  # exposed in evidence_pillars for transparency
+
         if call_count >= threshold:
             signal = "BUY_CALL"
             agreed = [v["agent"] for v in votes if v["vote"] == "BUY_CALL"]
@@ -2164,6 +2199,30 @@ class JudgeAgent:
             entry = price
             stop = round(price + stop_mult * atr, 2)
             target = round(price - tgt_mult * atr, 2)
+        elif soft_call and not soft_put:
+            signal = "BUY_CALL"
+            soft_fire_used = True
+            agreed = [v["agent"] for v in votes if v["vote"] == "BUY_CALL"]
+            disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_CALL"]
+            conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_CALL"]))
+            # Soft-fire signals carry a small confidence haircut (12%) — they
+            # haven't cleared the full hard threshold so we trade them slightly
+            # smaller. Better to take a 6:2 directional setup at 70% conf than
+            # to miss it entirely.
+            conf *= 0.88
+            entry = price
+            stop = round(price - stop_mult * atr, 2)
+            target = round(price + tgt_mult * atr, 2)
+        elif soft_put and not soft_call:
+            signal = "BUY_PUT"
+            soft_fire_used = True
+            agreed = [v["agent"] for v in votes if v["vote"] == "BUY_PUT"]
+            disagreed = [v["agent"] for v in votes if v["vote"] != "BUY_PUT"]
+            conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_PUT"]))
+            conf *= 0.88
+            entry = price
+            stop = round(price + stop_mult * atr, 2)
+            target = round(price - tgt_mult * atr, 2)
         else:
             signal = "HOLD"
             agreed = []
@@ -2176,14 +2235,17 @@ class JudgeAgent:
         # ── Conviction-dominance VETO ────────────────────────────────────
         # Bare vote-count is a weak gate: 6 agents at 51% confidence shouldn't
         # outweigh 3 at 90%. Require the winning camp's TOTAL CONFIDENCE
-        # weight to dominate the loser's by ≥1.25×, else fall back to HOLD.
-        # (1.25× = 56/44 split — softer than 1.4× so signals still fire.)
-        if signal == "BUY_CALL" and bear_weight > 0 and (bull_weight / bear_weight) < 1.25:
+        # weight to dominate the loser's by ≥1.20×, else fall back to HOLD.
+        # (1.20× = 55/45 split — v7.0.2 softened from 1.25× so a clean 6:2
+        # directional vote at 75-80% per-agent confidence reliably fires.
+        # The pillar-score gate below remains the harder quality filter.)
+        DOMINANCE_RATIO = 1.20
+        if signal == "BUY_CALL" and bear_weight > 0 and (bull_weight / bear_weight) < DOMINANCE_RATIO:
             signal = "HOLD"
             target = price
             stop = round(price - stop_mult * atr, 2)
             conf = 50.0
-        elif signal == "BUY_PUT" and bull_weight > 0 and (bear_weight / bull_weight) < 1.25:
+        elif signal == "BUY_PUT" and bull_weight > 0 and (bear_weight / bull_weight) < DOMINANCE_RATIO:
             signal = "HOLD"
             target = price
             stop = round(price - stop_mult * atr, 2)
@@ -2411,7 +2473,11 @@ class JudgeAgent:
             ema21 = float(ind.get("ema21") or price)
             st_dir = ind.get("supertrend_dir", "up")
             macd_hist = float(ind.get("macd_hist") or 0)
-            roc10 = float(ind.get("change_5d") or 0)  # 5-day price change % (proxy for ROC)
+            # Use the real 10-bar Rate-of-Change indicator (computed in
+            # indicators.py) — not the 5-day price-change proxy. Was a
+            # pre-v7.0.2 inconsistency where the post-forecast block read
+            # ind["roc10"] but the pillar block read ind["change_5d"].
+            roc10 = float(ind.get("roc10") or ind.get("change_5d") or 0)
             plus_di = float(ind.get("plus_di") or 25)
             minus_di = float(ind.get("minus_di") or 25)
             obv_slope = float(ind.get("obv_slope_10d_pct") or 0)
@@ -2455,6 +2521,12 @@ class JudgeAgent:
                 "aligned": pillars_aligned,
                 "total": 4,
                 "score": round(total_pillar_score, 2),
+                # v7.0.2: surface whether the signal fired from the soft
+                # consensus tier (≥ threshold-1 + 3:1 directional dominance)
+                # so the UI can show "fired on soft consensus" — useful for
+                # the trader to know this was a borderline call that still
+                # cleared every quality gate.
+                "soft_fire": bool(soft_fire_used),
             }
 
             # Veto when underlying tape is too weak. Threshold scales with
@@ -2612,13 +2684,16 @@ class JudgeAgent:
             n_diverse = len(cats_agree)
             # 1 category agreeing → −6%   (narrow consensus, suspicious)
             # 2 categories       →  0%   (neutral)
-            # 3 categories       → +5%   (broad)
-            # 4 categories       → +9%   (very broad)
-            # 5 categories       → +12%  (every classic lens aligned)
-            # 6 categories       → +14%  (v7.0 — adds macro+rotation)
-            # 7 categories       → +16%  (theoretical max if "other" present)
-            diversity_pct = {1: -6.0, 2: 0.0, 3: 5.0, 4: 9.0,
-                             5: 12.0, 6: 14.0, 7: 16.0}.get(n_diverse, 0.0)
+            # 3 categories       → +6%   (broad — v7.0.2 +1 from +5)
+            # 4 categories       → +11%  (very broad — v7.0.2 +2 from +9)
+            # 5 categories       → +13%  (every classic lens aligned)
+            # 6 categories       → +15%  (v7.0 — adds macro+rotation)
+            # 7 categories       → +17%  (theoretical max if "other" present)
+            # v7.0.2: 4-category bonus bumped because back-test showed broad
+            # cross-discipline agreement (trend + flow + sentiment + ml all
+            # agreeing) is the single strongest predictor of win rate.
+            diversity_pct = {1: -6.0, 2: 0.0, 3: 6.0, 4: 11.0,
+                             5: 13.0, 6: 15.0, 7: 17.0}.get(n_diverse, 0.0)
             # Penalise when the OPPOSING side is more diverse than ours —
             # means more "kinds" of evidence point against us.
             if len(cats_disagree) > n_diverse and n_diverse < 4:

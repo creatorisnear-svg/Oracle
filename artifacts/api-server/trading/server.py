@@ -770,7 +770,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.0.1-bugfix-ml-ordering-and-regime-stress"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.0.2-soft-consensus-tier-and-roc10-fix"}
 
 
 @app.get("/api/ml-stats")
@@ -1265,11 +1265,16 @@ def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
 
 
 @app.get("/api/quick/{symbol}")
-def quick_signal(symbol: str):
+def quick_signal(symbol: str, horizon: str = DEFAULT_HORIZON):
     sym = symbol.upper()
     try:
-        df, info = get_df(sym, period="1mo")
-        votes, ind = run_agents_sync(sym, df, info)
+        # v7.0.2: respect the horizon arg so /api/quick reports the same
+        # signal /api/analyze would for the same horizon. Was hard-coded
+        # to a 1mo daily window regardless of the caller's intent — meant
+        # the watchlist's "intraday" view was actually showing swing data.
+        h = get_horizon_config(horizon)
+        df, info = get_df(sym, period=h["period"], interval=h["interval"])
+        votes, ind = run_agents_sync(sym, df, info, horizon=h["key"])
         judgment = JUDGE.decide(votes, ind)
         # Apply same meta-judge calibration as the full analyze path so the
         # quick endpoint reports the same probability the dashboard would.
