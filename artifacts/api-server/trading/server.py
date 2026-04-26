@@ -1264,6 +1264,50 @@ def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
         return {"error": str(e), "symbol": sym}
 
 
+@app.get("/api/backtest/{symbol}")
+def backtest_one(symbol: str, horizon: str = DEFAULT_HORIZON,
+                 max_bars: int = 100):
+    """v7.0.2: walk-forward backtest one symbol on one horizon. Replays
+    historical bars through the 12-agent + Judge stack with no look-ahead,
+    scores actual price action over the horizon's lookforward window, and
+    returns win-rate / avg-return / profit-factor / hard-vs-soft tier split.
+    Use this to PROVE any future change improves accuracy before shipping it.
+    """
+    try:
+        import backtest as _bt
+        stats, trades = _bt.backtest_symbol(symbol.upper(), horizon,
+                                            max_bars=max_bars)
+        from dataclasses import asdict
+        return {
+            "stats": asdict(stats),
+            # Trim per-trade detail to keep the response small — the stats
+            # are what actually matter. Full trade list available via CLI.
+            "sample_trades": [asdict(t) for t in trades[:20]],
+            "total_trades_recorded": len(trades),
+        }
+    except Exception as e:
+        logger.error(f"backtest_one error {symbol} {horizon}: {e}")
+        return {"error": str(e), "symbol": symbol, "horizon": horizon}
+
+
+@app.post("/api/backtest/bulk")
+def backtest_many(req: dict):
+    """v7.0.2: bulk backtest. POST {symbols:[...], horizons:[...], max_bars:int}
+    Returns per-cell stats plus an overall aggregate. Use this for sweeps
+    when validating a code change — compare overall win-rate before/after."""
+    try:
+        import backtest as _bt
+        symbols = [s.upper() for s in (req.get("symbols") or [])]
+        horizons = [h.lower() for h in (req.get("horizons") or [DEFAULT_HORIZON])]
+        max_bars = int(req.get("max_bars") or 100)
+        if not symbols:
+            return {"error": "symbols list required"}
+        return _bt.backtest_bulk(symbols, horizons, max_bars=max_bars)
+    except Exception as e:
+        logger.error(f"backtest_many error: {e}")
+        return {"error": str(e)}
+
+
 @app.get("/api/quick/{symbol}")
 def quick_signal(symbol: str, horizon: str = DEFAULT_HORIZON):
     sym = symbol.upper()
