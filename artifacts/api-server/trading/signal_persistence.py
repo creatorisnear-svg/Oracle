@@ -14,7 +14,7 @@ Rules:
   • New went HOLD                           → keep the active directional
     trade. Agents going neutral isn't a reason to abandon an open position.
   • Opposite direction with weak consensus  → keep active trade.
-  • Opposite direction with STRONG (≥7/10)  → flip. A genuine reversal.
+  • Opposite direction with STRONG (≥8/12)  → flip. A genuine reversal.
 
 The "active" trade for (symbol, horizon) is the most recent non-HOLD prediction
 in predictions.db that:
@@ -36,8 +36,8 @@ from learning import DB_PATH, HORIZON_WINDOW_HOURS, _parse_iso
 # (out of 10) before we abandon an open trade and flip directions.
 # Bumped 6→7 with the v6.7 addition of MLAgent (10th agent) so the
 # "STRONG" reversal bar stays meaningfully above the firing threshold
-# of 6/10 (60%). 7/10 = 70% — true majority disagreement before a flip.
-STRONG_REVERSAL_VOTES = 7
+# of 7/12 (~58%). 8/12 ≈ 67% — true majority disagreement before a flip (v7.0).
+STRONG_REVERSAL_VOTES = 8
 
 
 def get_active_trade(symbol: str, horizon: str) -> Optional[dict]:
@@ -160,7 +160,7 @@ def apply_persistence(judgment: dict, active: Optional[dict]) -> tuple[dict, boo
         out["sticky"] = {
             "kind": "flipped",
             "from": active_sig,
-            "message": f"Strong reversal ({new_consensus}/10) — flipped from {active_sig}",
+            "message": f"Strong reversal ({new_consensus}/12) — flipped from {active_sig}",
         }
         return out, True  # save the new flipped signal
 
@@ -177,7 +177,7 @@ def apply_persistence(judgment: dict, active: Optional[dict]) -> tuple[dict, boo
         "open_since": active["created_at"],
         "age": age,
         "message": (
-            f"Locked in since {age} — only {new_consensus}/10 {new_dir} "
+            f"Locked in since {age} — only {new_consensus}/12 {new_dir} "
             f"(need {STRONG_REVERSAL_VOTES} to flip)"
         ),
     }

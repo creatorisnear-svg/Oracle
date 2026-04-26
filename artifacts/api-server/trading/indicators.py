@@ -1075,6 +1075,83 @@ def compute_hurst(closes, lookback=64):
     return {"hurst": round(h, 3), "regime_kind": kind}
 
 
+def compute_anchored_vwap(highs, lows, closes, volumes, lookback=40):
+    """
+    Anchored VWAP from the most recent swing high AND swing low.
+
+    Standard session-VWAP resets each day. Anchored VWAP starts from a
+    pivot (swing high/low) and accumulates from there — institutions
+    treat these as massive support/resistance because they represent
+    the average fill price for everyone who's been holding since the
+    pivot. Price reclaiming an aVWAP from below = capitulation flip;
+    rejecting it from above = trend resumption.
+
+    We compute two anchors:
+      * avwap_high — anchored at the highest high in the last `lookback` bars
+      * avwap_low  — anchored at the lowest  low  in the last `lookback` bars
+
+    Returns:
+      avwap_high, avwap_low — price levels
+      dist_to_avwap_high_pct, dist_to_avwap_low_pct — % distance from current price
+      avwap_signal in [-1, +1]:
+        +1 = above BOTH (strong bull control of recent range)
+        -1 = below BOTH (strong bear control)
+         0 = between them (chop / undecided)
+    """
+    n = len(closes)
+    if n < 8 or n != len(volumes):
+        return {
+            "avwap_high": float(closes[-1]) if n else 0.0,
+            "avwap_low": float(closes[-1]) if n else 0.0,
+            "dist_to_avwap_high_pct": 0.0,
+            "dist_to_avwap_low_pct": 0.0,
+            "avwap_signal": 0.0,
+        }
+    lb = min(lookback, n)
+    h = np.asarray(highs[-lb:], dtype=float)
+    l = np.asarray(lows[-lb:], dtype=float)
+    c = np.asarray(closes[-lb:], dtype=float)
+    v = np.asarray(volumes[-lb:], dtype=float)
+    # Swing-anchor indices within the lookback window
+    hi_idx = int(np.argmax(h))
+    lo_idx = int(np.argmin(l))
+    typical = (h + l + c) / 3.0
+
+    def _avwap_from(start_idx: int) -> float:
+        seg_t = typical[start_idx:]
+        seg_v = v[start_idx:]
+        tot_v = float(seg_v.sum())
+        if tot_v <= 0:
+            return float(c[-1])
+        return float((seg_t * seg_v).sum() / tot_v)
+
+    avwap_high = _avwap_from(hi_idx)
+    avwap_low = _avwap_from(lo_idx)
+    price = float(closes[-1])
+    dist_h = (price - avwap_high) / price * 100.0 if price > 0 else 0.0
+    dist_l = (price - avwap_low) / price * 100.0 if price > 0 else 0.0
+
+    # Above both = bulls control everything since the last pivot.
+    # Below both = bears do. Between = no one's in charge.
+    above_high = price > avwap_high
+    above_low = price > avwap_low
+    if above_high and above_low:
+        # Stronger when farther above both
+        sig = min(1.0, max(dist_h, 0.0) / 2.0 + 0.4)
+    elif (not above_high) and (not above_low):
+        sig = -min(1.0, abs(min(dist_h, 0.0)) / 2.0 + 0.4)
+    else:
+        # Between the anchors — unresolved
+        sig = 0.0
+    return {
+        "avwap_high": round(avwap_high, 4),
+        "avwap_low": round(avwap_low, 4),
+        "dist_to_avwap_high_pct": round(dist_h, 3),
+        "dist_to_avwap_low_pct": round(dist_l, 3),
+        "avwap_signal": round(sig, 3),
+    }
+
+
 def monte_carlo_target_prob(price, target, vol_pct, days=7, n_sims=2000):
     """Probability of price touching `target` within `days` trading days using GBM."""
     if price <= 0 or vol_pct <= 0 or days <= 0:
@@ -1146,6 +1223,7 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
     range_info = compute_range_metrics(highs, lows, closes)
     vp_info = compute_volume_profile(highs, lows, closes, volumes)
     hurst_info = compute_hurst(closes)
+    avwap_info = compute_anchored_vwap(highs, lows, closes, volumes)
 
     # Volume stats
     avg_vol_20 = np.mean(volumes[-20:]) if n >= 20 else np.mean(volumes) if n > 0 else 1
@@ -1297,6 +1375,12 @@ def compute_all_indicators(df: pd.DataFrame) -> dict:
         "vp_above_poc": vp_info.get("vp_above_poc", False),
         "hurst": hurst_info.get("hurst", 0.5),
         "regime_kind": hurst_info.get("regime_kind", "neutral"),
+        # ── v7.0 alpha sources ─────────────────────────────────────
+        "avwap_high": avwap_info.get("avwap_high", price),
+        "avwap_low": avwap_info.get("avwap_low", price),
+        "dist_to_avwap_high_pct": avwap_info.get("dist_to_avwap_high_pct", 0.0),
+        "dist_to_avwap_low_pct": avwap_info.get("dist_to_avwap_low_pct", 0.0),
+        "avwap_signal": avwap_info.get("avwap_signal", 0.0),
     }
 
 

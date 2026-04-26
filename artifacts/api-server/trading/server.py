@@ -1,7 +1,8 @@
 """
 TradeSignal AI — FastAPI backend v6.9
 10 Agents: PriceAction, Technical, Volume, Sentiment, OptionsFlow, Momentum,
-          Risk, FearGreed, Political, ML  +  Judge (fires at 6/10 consensus)
+          Risk, FearGreed, Political, ML, SectorRS, MarketRegime
+          +  Judge (fires at 7/12 consensus)
 Endpoints: /api/fear-greed  /api/political-news  /api/accuracy
            /api/accuracy/{symbol}  /api/ml-stats
 """
@@ -25,7 +26,8 @@ import paper_trading
 from agents import (
     PriceActionAgent, TechnicalAgent, VolumeAgent,
     SentimentAgent, OptionsFlowAgent, MomentumAgent,
-    RiskAgent, FearGreedAgent, PoliticalAgent, MLAgent, JudgeAgent,
+    RiskAgent, FearGreedAgent, PoliticalAgent, MLAgent,
+    SectorRelativeStrengthAgent, MarketRegimeAgent, JudgeAgent,
     HORIZONS, get_horizon_config, DEFAULT_HORIZON, compute_htf_trend,
 )
 from indicators import compute_all_indicators, safe_float
@@ -59,7 +61,9 @@ AGENTS = [
     PriceActionAgent(), TechnicalAgent(), VolumeAgent(),
     SentimentAgent(), OptionsFlowAgent(), MomentumAgent(),
     RiskAgent(), FearGreedAgent(), PoliticalAgent(),
-    MLAgent(),  # v6.9 — online-learning logistic-regression on 15 indicators (gap/POC/NR4-7 added)
+    MLAgent(),  # 10 — online-learning logistic-regression on 15 indicators
+    SectorRelativeStrengthAgent(),  # 11 — v7.0 sector rotation edge
+    MarketRegimeAgent(),  # 12 — v7.0 macro filter (VIX/SPY/risk-on)
 ]
 JUDGE = JudgeAgent()
 
@@ -598,6 +602,7 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
     ind["_symbol"] = sym
     ind["_horizon"] = horizon  # JudgeAgent reads this to scale stops/targets/threshold
     ind["_news"] = _LIVE_CACHE.get(sym, {}).get("news", [])
+    ind["_info"] = info or {}  # v7.0: SectorRS agent reads info["sector"] from here
     # ── Higher-TF & market-context filters (accuracy boosters) ─────
     ind["weekly_trend"] = _weekly_trend(sym)
     # Per-horizon higher-timeframe trend (the #1 alpha source — the bigger
@@ -658,6 +663,12 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
             "symbol": round(sw, 3),
             "horizon": round(hw, 3),
         }
+        # v7.0: lift sector-RS extras into `ind` so MLAgent + snapshot can
+        # see them. Other agents are free to do the same — we just whitelist
+        # known numeric fields to keep the indicators dict tidy.
+        for k in ("rs_score", "rs_5d", "rs_20d", "sector_etf"):
+            if k in vote and k not in ind:
+                ind[k] = vote[k]
         votes.append(vote)
     return votes, ind
 
@@ -756,7 +767,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "6.9-alpha-sources-and-diversity"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.0-sector-rs-and-macro-regime"}
 
 
 @app.get("/api/ml-stats")
@@ -1045,7 +1056,7 @@ def accuracy_report():
     try:
         report = LEARNING.get_accuracy_report()
         agent_methods = {a.name: getattr(a, "method", "") for a in AGENTS}
-        agent_methods[JUDGE.name] = "6/10 consensus threshold (60%) — fires CALL/PUT only on majority agreement, then weight-veto + overextension/earnings filters"
+        agent_methods[JUDGE.name] = "7/12 consensus threshold (~58%) — fires CALL/PUT only on majority agreement, then weight-veto + overextension/earnings + diversity-bonus filters"
         return {
             "status": "ok",
             "report": report,
@@ -1208,7 +1219,7 @@ def analyze(symbol: str, period: str = "", horizon: str = DEFAULT_HORIZON):
         raw_judgment = meta_judge.apply_meta_judge(raw_judgment, votes)
 
         # Signal stickiness — keep an open trade plan locked unless target/stop
-        # hit, the hold window elapsed, or a strong reversal fires (≥7/10).
+        # hit, the hold window elapsed, or a strong reversal fires (≥8/12).
         active = get_active_trade(sym, h["key"])
         judgment, should_save = apply_persistence(raw_judgment, active)
 
@@ -1553,7 +1564,7 @@ async def ws_analyze(websocket: WebSocket, symbol: str):
 
         await websocket.send_text(json.dumps({
             "type": "status",
-            "message": "🤖 All 10 agents running in parallel..."
+            "message": "🤖 All 12 agents running in parallel..."
         }))
 
         # 4. Run all agents in parallel, then send all votes + judgment in one message

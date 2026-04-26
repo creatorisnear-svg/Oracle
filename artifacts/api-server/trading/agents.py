@@ -1,14 +1,15 @@
 """
-10 Trading Prediction Agents + Judge  (v6.7 — Full Indicator + ML Suite)
+12 Trading Prediction Agents + Judge  (v7.0 — Sector-RS + Macro Regime added)
 Signals: BUY_CALL | BUY_PUT | HOLD
 Agents: Price Action, Technical, Volume, Sentiment, Options Flow, Momentum,
-        Risk, Fear & Greed, Political, ML.
-Judge fires at the horizon's THRESHOLD (6/10 default = 60%; intraday/day
+        Risk, Fear & Greed, Political, ML, Sector RS, Market Regime.
+Judge fires at the horizon's THRESHOLD (7/12 default ≈ 58%; intraday/day
 stricter via pillar floor — see HORIZONS dict). The conviction-dominance
-veto (now WEIGHT-AWARE — multiplies confidence by each agent's learned
+veto (WEIGHT-AWARE — multiplies confidence by each agent's learned
 reliability), evidence-pillar floor, ADX-chop filter, weekly/SPY/HTF tilt,
-earnings veto, volume-divergence penalty and overextension gates do the
-additional filtering on top of the raw consensus.
+earnings veto, agent-diversity bonus (now 6 categories), volume-divergence
+penalty and overextension gates do the additional filtering on top of the
+raw consensus.
 """
 import os
 import math
@@ -72,11 +73,12 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 5,
         "target_hit_bars": 24,      # 2 hours
         "stop_mult": 0.7, "tgt_mult": 0.9,
-        # Threshold = 6/10 (60%). Bumped from 5/9 → 6/10 with the v6.7
-        # addition of the ML Agent so the consensus bar stays at ~60% —
-        # the stricter min_pillar_score=1.5 still provides extra rigor
-        # for noisy intraday bars. (6/10 ≈ 5/9 in difficulty.)
-        "threshold": 6,
+        # Threshold = 7/12 (≈58%). Bumped 6→7 in v7.0 with the addition
+        # of Sector-RS and Market-Regime agents (now 12 total). Keeps the
+        # consensus bar at ~58% (7/12) — was 6/10=60% pre-v7.0
+        # because the two new agents act as filters (often vote HOLD when
+        # macro/sector are unclear), so requiring 8/12 would over-restrict.
+        "threshold": 7,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",  # confirm with hourly trend
         "expiry_pref": "0DTE / weekly",
@@ -88,9 +90,9 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 15,
         "target_hit_bars": 16,      # rest of day
         "stop_mult": 0.8, "tgt_mult": 1.1,
-        # 6/10 = 60% — same reason as intraday. Pillar floor at 1.5 plus
+        # 7/12 = 58% — same reasoning as intraday. Pillar floor at 1.5 plus
         # the HTF tilt and conviction-dominance gates still filter.
-        "threshold": 6,
+        "threshold": 7,
         "min_pillar_score": 1.5,
         "htf_period": "5d", "htf_interval": "1h",
         "expiry_pref": "0DTE / weekly",
@@ -102,7 +104,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 60,
         "target_hit_bars": 30,
         "stop_mult": 1.0, "tgt_mult": 1.4,
-        "threshold": 6,             # 6/10 — HTF + conviction gates do the filtering
+        "threshold": 7,             # 7/12 — HTF + conviction gates do the filtering
         "min_pillar_score": 1.0,
         "htf_period": "6mo", "htf_interval": "1d",  # daily trend gate
         "expiry_pref": "weekly / 2-week",
@@ -114,7 +116,7 @@ HORIZONS: dict[str, dict] = {
         "bar_minutes": 24 * 60,
         "target_hit_bars": 7,
         "stop_mult": 1.1, "tgt_mult": 1.3,
-        "threshold": 6,
+        "threshold": 7,
         "min_pillar_score": 1.0,
         "htf_period": "1y", "htf_interval": "1wk",  # weekly trend gate
         "expiry_pref": "2-week / monthly",
@@ -1321,6 +1323,14 @@ ML_FEATURES_DEFAULT: dict[str, float] = {
     # NR4/NR7 range compression × prior 5-day slope sign — predicts
     # breakout direction. Feature is compression × tanh(5d_slope).
     "range_compression": 0.45,
+    # ── v7.0 — anchored-VWAP & sector-RS ───────────────────────────
+    # Anchored VWAP signal — above both swing-anchored VWAPs = bulls
+    # in control of the recent range. Feature in [-1, +1].
+    "avwap_signal":      0.55,
+    # Sector relative-strength score (stock 5d/20d return − sector ETF).
+    # Positive = leading sector → bullish bias. Feature is rs_score / 4
+    # so a +6% RS over the sector saturates the signal.
+    "rs_score":          0.45,
 }
 
 
@@ -1331,13 +1341,14 @@ def _ml_pretty(k: str) -> str:
         "cs_pattern": "Patterns", "bb_position": "BB", "vwap_distance": "VWAP",
         "trend_score": "Trend", "williams_r": "W%R", "cmf": "CMF",
         "gap_signal": "Gap", "vp_position": "POC", "range_compression": "NRn",
+        "avwap_signal": "aVWAP", "rs_score": "RS",
     }.get(k, k)
 
 
 class MLAgent:
     name = "ML Agent"
     emoji = "🤖"
-    method = "Logistic regression on 15 indicators (online learning from resolved predictions)"
+    method = "Logistic regression on 17 indicators (online learning from resolved predictions)"
 
     # Class-level cache so we don't re-read ml_weights.json on every call.
     _weights_cache: dict | None = None
@@ -1380,7 +1391,7 @@ class MLAgent:
 
     @staticmethod
     def _extract(ind: dict) -> dict:
-        """Build the 12-feature vector from an indicators dict (live or snapshot).
+        """Build the 17-feature vector from an indicators dict (live or snapshot).
 
         Tolerant to missing keys — uses neutral defaults so old DB snapshots
         (which may not contain v6.6 fields like cs_pattern_score) don't crash
@@ -1417,6 +1428,11 @@ class MLAgent:
             # direction. Only meaningful when an NR4/NR7 setup is present.
             nr_active = bool(ind.get("nr4")) or bool(ind.get("nr7"))
             range_feat = (comp * math.tanh(ch5 / 3.0)) if nr_active else 0.0
+            # v7.0: anchored-VWAP signal (already normalised in [-1, +1])
+            avwap_sig = float(ind.get("avwap_signal") or 0.0)
+            # v7.0: sector relative-strength score, normalised so ±4% saturates
+            rs_score = float(ind.get("rs_score") or 0.0)
+            rs_feat = math.tanh(rs_score / 4.0)
             # ADX directional fix (v6.9): clamp the (adx-20) at 0 BEFORE
             # multiplying by direction so weak trends contribute zero
             # instead of inverting the sign (was a real bug pre-v6.9).
@@ -1440,6 +1456,9 @@ class MLAgent:
                 "gap_signal":       max(-1.0, min(1.0, gap_sig)),
                 "vp_position":      max(-1.0, min(1.0, vp_pos)),
                 "range_compression": max(-1.0, min(1.0, range_feat)),
+                # v7.0
+                "avwap_signal":     max(-1.0, min(1.0, avwap_sig)),
+                "rs_score":         max(-1.0, min(1.0, rs_feat)),
             }
         except Exception:
             return {k: 0.0 for k in ML_FEATURES_DEFAULT}
@@ -1788,6 +1807,19 @@ def compute_target_hit_probability(
              prior_slope > 0.5, prior_slope < -0.5,
              f"{nr_label} setup (5d {prior_slope:+.1f}%)")
 
+    # ── v7.0 alpha sources ────────────────────────────────────────
+    # Anchored VWAP from recent swing high & swing low. Above both =
+    # bulls control everything since the last pivot; below both = bears
+    # do. Institutions watch these levels heavily because they represent
+    # the average fill price for everyone holding since the pivot.
+    avwap_sig = float(ind.get("avwap_signal") or 0.0)
+    dist_h = float(ind.get("dist_to_avwap_high_pct") or 0.0)
+    dist_l = float(ind.get("dist_to_avwap_low_pct") or 0.0)
+    _add("Anchored VWAP", 0.85,
+         avwap_sig >= 0.4,
+         avwap_sig <= -0.4,
+         f"vs hi {dist_h:+.2f}% / vs lo {dist_l:+.2f}%")
+
     alignment = (total_signed / total_weight) if total_weight > 0 else 0.0
     alignment = max(-1.0, min(1.0, alignment))
 
@@ -1825,12 +1857,224 @@ def compute_target_hit_probability(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JUDGE AGENT  (fires at horizon's THRESHOLD — default 6/10 = 60%)
+# 11. SECTOR RELATIVE-STRENGTH AGENT  (v7.0)
+# ─────────────────────────────────────────────────────────────────────────────
+# Institutional rotation is one of the most reliable mid-horizon edges:
+# leaders keep leading and laggards keep lagging until the rotation flips.
+# This agent compares the symbol's 5- AND 20-day return vs its sector ETF,
+# and votes CALL when the stock is leading its sector by ≥1.5%, PUT when
+# it's lagging by the same. Confidence scales with the magnitude.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Map yfinance `info["sector"]` strings to SPDR sector ETFs.
+_SECTOR_ETF: dict[str, str] = {
+    "Technology": "XLK", "Communication Services": "XLC",
+    "Financial Services": "XLF", "Financial": "XLF",
+    "Energy": "XLE", "Healthcare": "XLV",
+    "Consumer Cyclical": "XLY", "Consumer Discretionary": "XLY",
+    "Consumer Defensive": "XLP", "Consumer Staples": "XLP",
+    "Industrials": "XLI", "Basic Materials": "XLB", "Materials": "XLB",
+    "Utilities": "XLU", "Real Estate": "XLRE",
+}
+
+# Symbol-level overrides (covers ETFs / oddballs that lack a clean sector field)
+_SYMBOL_TO_ETF: dict[str, str] = {
+    "QQQ": "XLK", "SMH": "XLK", "SOXL": "XLK", "SOXX": "XLK",
+    "ARKK": "XLK", "BTC-USD": "SPY", "COIN": "XLF", "GLD": "SPY",
+    "TLT": "SPY", "HYG": "SPY", "USO": "XLE", "UNG": "XLE",
+    "XBI": "XLV", "IBB": "XLV", "KRE": "XLF", "XHB": "XLY",
+}
+
+
+class SectorRelativeStrengthAgent:
+    name = "Sector RS Agent"
+    emoji = "🔄"
+    method = "Stock vs sector-ETF 5d/20d relative strength + rotation rank"
+    _SECTOR_CACHE: dict[str, tuple[float, float, float]] = {}  # etf → (chg5, chg20, ts)
+    _CACHE_TTL = 600  # 10 min
+
+    def _resolve_etf(self, sym: str, info: dict) -> str:
+        if sym in _SYMBOL_TO_ETF:
+            return _SYMBOL_TO_ETF[sym]
+        sector = (info or {}).get("sector") or ""
+        return _SECTOR_ETF.get(sector, "SPY")
+
+    def _etf_returns(self, etf: str) -> tuple[float, float]:
+        """Returns (chg5_pct, chg20_pct) for the ETF. Cached 10min."""
+        cached = self._SECTOR_CACHE.get(etf)
+        if cached and (time.time() - cached[2]) < self._CACHE_TTL:
+            return cached[0], cached[1]
+        try:
+            import yfinance as yf
+            d = yf.Ticker(etf).history(period="2mo", interval="1d")
+            if d.empty or len(d) < 22:
+                return 0.0, 0.0
+            closes = d["Close"].values
+            p_now = float(closes[-1])
+            p5 = float(closes[-6]) if len(closes) >= 6 else p_now
+            p20 = float(closes[-21]) if len(closes) >= 21 else p_now
+            chg5 = (p_now - p5) / p5 * 100 if p5 > 0 else 0.0
+            chg20 = (p_now - p20) / p20 * 100 if p20 > 0 else 0.0
+            self._SECTOR_CACHE[etf] = (chg5, chg20, time.time())
+            return chg5, chg20
+        except Exception:
+            return 0.0, 0.0
+
+    def analyze(self, df, ind):
+        try:
+            sym = ind.get("_symbol", "")
+            info = ind.get("_info") or {}  # set by server.py if available
+            etf = self._resolve_etf(sym, info)
+
+            # If we ARE the sector ETF, this agent has no edge — abstain.
+            if sym == etf:
+                return _hold(self.name, self.emoji, f"{sym} is its own sector benchmark")
+
+            # Stock returns from the price series
+            closes = df["Close"].values.astype(float)
+            if len(closes) < 22:
+                return _hold(self.name, self.emoji, "insufficient history")
+            p_now = float(closes[-1])
+            p5 = float(closes[-6])
+            p20 = float(closes[-21])
+            stock_5 = (p_now - p5) / p5 * 100 if p5 > 0 else 0.0
+            stock_20 = (p_now - p20) / p20 * 100 if p20 > 0 else 0.0
+
+            etf_5, etf_20 = self._etf_returns(etf)
+            rs5 = stock_5 - etf_5     # outperformance over 5d
+            rs20 = stock_20 - etf_20  # outperformance over 20d
+            # Weighted blend: 5d gets more weight (acts faster) but 20d
+            # confirms the trend isn't a 1-day pop.
+            rs_score = 0.6 * rs5 + 0.4 * rs20
+
+            # Persistence bonus — both timeframes pointing the same way
+            both_lead = rs5 > 0 and rs20 > 0
+            both_lag = rs5 < 0 and rs20 < 0
+            persistence_bonus = 5.0 if (both_lead or both_lag) else 0.0
+
+            reason = (f"vs {etf}: 5d {rs5:+.2f}% / 20d {rs20:+.2f}% "
+                      f"(score {rs_score:+.2f})")
+
+            base_extra = {
+                "sector_etf": etf,
+                "rs_score": round(rs_score, 3),
+                "rs_5d": round(rs5, 3),
+                "rs_20d": round(rs20, 3),
+                "stock_5d": round(stock_5, 3),
+                "etf_5d": round(etf_5, 3),
+            }
+
+            # Strong leader → CALL bias. Strong laggard → PUT bias.
+            # Threshold of 1.5% over the sector is the meaningful edge.
+            if rs_score >= 1.5:
+                conf = min(85.0, 58.0 + abs(rs_score) * 4.0 + persistence_bonus)
+                return {**_vote(self.name, self.emoji, "BUY_CALL", conf,
+                                f"Leading {etf} — {reason}"), **base_extra}
+            elif rs_score <= -1.5:
+                conf = min(85.0, 58.0 + abs(rs_score) * 4.0 + persistence_bonus)
+                return {**_vote(self.name, self.emoji, "BUY_PUT", conf,
+                                f"Lagging {etf} — {reason}"), **base_extra}
+            else:
+                return {**_hold(self.name, self.emoji,
+                                f"In line with {etf} — {reason}"), **base_extra}
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. MARKET REGIME AGENT  (v7.0)
+# ─────────────────────────────────────────────────────────────────────────────
+# Macro filter agent. Reads the already-computed `market_regime` and
+# `macro_basket` (set by server.py) to decide if conditions favour going
+# LONG (risk-on, low VIX, SPY uptrend), SHORT (risk-off, high VIX), or
+# stepping aside (chop / unknown). Designed to add NEW information rather
+# than duplicate the trend agents — it speaks ONLY to macro context.
+# Confidence intentionally moderate (max 75%) so it acts as a filter,
+# not as the lead voice in the consensus.
+# ─────────────────────────────────────────────────────────────────────────────
+class MarketRegimeAgent:
+    name = "Market Regime Agent"
+    emoji = "🌐"
+    method = "VIX level + SPY 50/200 EMA cross + macro risk-on/off basket"
+
+    def analyze(self, df, ind):
+        try:
+            regime = ind.get("market_regime") or {}
+            macro = ind.get("macro_basket") or {}
+            spy = ind.get("spy_trend") or {}
+
+            label = str(regime.get("label", "unknown"))
+            vix = float(regime.get("vix") or 0.0)
+            spy_above = bool(regime.get("spy_above_200ema"))
+            golden = bool(regime.get("golden_cross"))
+            risk_on = int(macro.get("risk_on_score") or 0)
+            curve_inv = bool(macro.get("yield_curve_inverted"))
+            spy_dir = str(spy.get("dir", "flat"))
+
+            # Build a -3..+3 macro score
+            score = 0
+            reasons = []
+            # 1) Primary regime
+            if label == "bull":
+                score += 1; reasons.append("bull regime")
+            elif label == "bear":
+                score -= 1; reasons.append("bear regime")
+            elif label == "risk-off":
+                score -= 2; reasons.append(f"risk-off (VIX {vix:.0f})")
+            # 2) SPY direction
+            if spy_dir == "up":
+                score += 1; reasons.append("SPY up-trend")
+            elif spy_dir == "down":
+                score -= 1; reasons.append("SPY down-trend")
+            # 3) VIX level (separate from regime classification)
+            if vix > 0:
+                if vix < 14:
+                    score += 1; reasons.append(f"VIX low {vix:.0f}")
+                elif vix > 25:
+                    score -= 1; reasons.append(f"VIX high {vix:.0f}")
+            # 4) Macro risk-on basket
+            if risk_on >= 2:
+                score += 1; reasons.append("macro risk-on")
+            elif risk_on <= -2:
+                score -= 1; reasons.append("macro risk-off")
+            # 5) Yield-curve inversion = mild bearish bias
+            if curve_inv:
+                score -= 1; reasons.append("yield-curve inverted")
+
+            # Translate score → vote. Conservative thresholds (need ≥+2 / ≤-2)
+            # so this agent only takes a side when macro genuinely tilts.
+            magnitude = abs(score)
+            r = " · ".join(reasons[:3]) if reasons else "macro context unclear"
+            base_extra = {
+                "macro_score": int(score),
+                "regime_label": label,
+                "vix": vix,
+                "spy_above_200ema": spy_above,
+                "golden_cross": golden,
+            }
+
+            if score >= 2:
+                conf = min(75.0, 55.0 + magnitude * 4.0)
+                return {**_vote(self.name, self.emoji, "BUY_CALL", conf,
+                                f"Bull macro — {r}"), **base_extra}
+            elif score <= -2:
+                conf = min(75.0, 55.0 + magnitude * 4.0)
+                return {**_vote(self.name, self.emoji, "BUY_PUT", conf,
+                                f"Bear macro — {r}"), **base_extra}
+            else:
+                return {**_hold(self.name, self.emoji,
+                                f"Neutral macro — {r}"), **base_extra}
+        except Exception as e:
+            return _hold(self.name, self.emoji, f"Error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JUDGE AGENT  (fires at horizon's THRESHOLD — default 7/12 = 58% in v7.0)
 # ─────────────────────────────────────────────────────────────────────────────
 class JudgeAgent:
     name = "Judge Agent"
     emoji = "⚖️"
-    THRESHOLD = 6  # out of 10 analysts (default — overridden by horizon config)
+    THRESHOLD = 7  # out of 12 analysts (v7.0 — default; horizons override)
 
     def decide(self, votes: list, ind: dict) -> dict:
         price = ind.get("price", 0)
@@ -2235,7 +2479,7 @@ class JudgeAgent:
             # 3.0+ → full confidence (well-supported)
 
         # Consensus strength: the more dissenting agents, the lower the conviction.
-        # 10/10 agree → 1.00x; 6/10 → 0.82x.
+        # 12/12 agree → 1.00x; 7/12 → ~0.82x.
         if signal != "HOLD" and total_analysts > 0:
             agree_n = call_count if signal == "BUY_CALL" else put_count
             consensus_factor = 0.55 + 0.45 * (agree_n / total_analysts)
@@ -2345,6 +2589,8 @@ class JudgeAgent:
         #   sentiment — news sentiment, fear/greed, political
         #   ml        — pure online-learned logistic regression
         if signal != "HOLD":
+            # v7.0: 6 categories now (added "rotation" for Sector RS, "macro"
+            # for Market Regime). Bonus scale extended for the 6th category.
             AGENT_CATEGORY = {
                 "Price Action Agent": "trend",
                 "Technical Agent": "trend",
@@ -2356,6 +2602,8 @@ class JudgeAgent:
                 "Political Agent": "sentiment",
                 "Risk Agent": "meanrev",
                 "ML Agent": "ml",
+                "Sector RS Agent": "rotation",
+                "Market Regime Agent": "macro",
             }
             cats_agree = {AGENT_CATEGORY.get(v["agent"], "other")
                           for v in votes if v["vote"] == signal}
@@ -2367,8 +2615,11 @@ class JudgeAgent:
             # 2 categories       →  0%   (neutral)
             # 3 categories       → +5%   (broad)
             # 4 categories       → +9%   (very broad)
-            # 5 categories       → +12%  (every analytical lens aligned)
-            diversity_pct = {1: -6.0, 2: 0.0, 3: 5.0, 4: 9.0, 5: 12.0}.get(n_diverse, 0.0)
+            # 5 categories       → +12%  (every classic lens aligned)
+            # 6 categories       → +14%  (v7.0 — adds macro+rotation)
+            # 7 categories       → +16%  (theoretical max if "other" present)
+            diversity_pct = {1: -6.0, 2: 0.0, 3: 5.0, 4: 9.0,
+                             5: 12.0, 6: 14.0, 7: 16.0}.get(n_diverse, 0.0)
             # Penalise when the OPPOSING side is more diverse than ours —
             # means more "kinds" of evidence point against us.
             if len(cats_disagree) > n_diverse and n_diverse < 4:

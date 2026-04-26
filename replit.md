@@ -1,4 +1,77 @@
-# TradeSignal AI — 10-Agent Trading Prediction System v6.9
+# TradeSignal AI — 12-Agent Trading Prediction System v7.0
+
+## v7.0 — Sector Relative-Strength + Macro Regime agents, Anchored VWAP, threshold rebalance
+A targeted accuracy upgrade aimed at +5–10% prediction lift, on top of v6.9.
+Adds two genuinely *new information sources* to the consensus (sector-relative
+strength and macro regime) instead of more trend-overlap, plus a third
+swing-anchored VWAP indicator. Threshold rebalanced from 6/10 → 7/12 to keep
+the ~58% consensus bar despite the larger panel.
+**Files touched:** `indicators.py`, `agents.py`, `meta_learning.py`, `server.py`,
+`signal_persistence.py`, `mockups/TradingDashboard.tsx`.
+
+**New indicator — Anchored VWAP (`indicators.py::compute_anchored_vwap`):**
+- Anchors VWAP from the most recent swing high AND the most recent swing low
+  in the last ~30 bars. Returns `avwap_high`, `avwap_low`,
+  `dist_to_avwap_high_pct`, `dist_to_avwap_low_pct`, and a unified
+  `avwap_signal` ∈ [-1, +1] (above both = +1 bullish, below both = -1 bearish).
+- Wired into `compute_all_indicators` and added as a new alignment item
+  (weight 0.85) in `compute_target_hit_probability`.
+
+**New agent #11 — Sector Relative Strength (`agents.py::SectorRelativeStrengthAgent`):**
+- Maps the symbol to its SPDR sector ETF (XLK / XLF / XLE / XLV / XLY / XLP /
+  XLI / XLU / XLRE / XLB / XLC, SPY fallback) using a small built-in lookup.
+- Compares stock 5d/20d returns vs the ETF; computes
+  `rs_score = 0.6×rs_5d + 0.4×rs_20d` (weighted blend that reacts fast but
+  needs the 20d to confirm). Persistence bonus when both timeframes lead/lag
+  in the same direction.
+- Votes BUY_CALL when `rs_score ≥ +1.5` (leading sector), BUY_PUT when
+  `≤ −1.5` (lagging), HOLD otherwise. Confidence scales with magnitude up
+  to 85%. Smartly skips SPY (it's its own benchmark).
+
+**New agent #12 — Market Regime (`agents.py::MarketRegimeAgent`):**
+- Pure macro-filter agent. Reads the already-computed `market_regime`,
+  `macro_basket`, and `spy_trend` (cached, set by `server.py`) — VIX level,
+  SPY 50/200 EMA cross, golden/death-cross, risk-on/off basket score.
+- Risk-on (VIX<18 + SPY uptrend) → small CALL bias; risk-off (VIX>25 or
+  bear cross) → small PUT bias; choppy → HOLD. Confidence intentionally
+  capped at 75% so it acts as a tilt/filter rather than a lead voice.
+
+**Judge & threshold rebalance (`agents.py`, `signal_persistence.py`):**
+- All four `HORIZONS` thresholds bumped 6 → 7 (7/12 ≈ 58%). Stays close to
+  the v6.9 bar despite two new agents being added.
+- `JudgeAgent.THRESHOLD` constant bumped 6 → 7.
+- `STRONG_REVERSAL_VOTES` 7 → 8 (8/12 ≈ 67% — keeps the existing reversal
+  bar at "two-thirds majority must flip" before busting an open trade).
+- **Agent-diversity bonus extended to 6 categories.** New agents get their
+  own category buckets (`Sector RS Agent`→"rotation",
+  `Market Regime Agent`→"macro") so the diversity scale now goes
+  1→−6%, 2→0, 3→+5, 4→+9, 5→+12, 6→+14, 7→+16. Stronger reward for a
+  truly broad consensus across trend + flow + macro + sector + ML.
+
+**ML Agent — feature vector 15 → 17 (`agents.py::MLAgent`):**
+- Added `avwap_signal` (default weight 0.55) and `rs_score` (0.45,
+  normalised via `tanh(rs_score/4)` so ±4% RS saturates).
+- `SNAPSHOT_FEATURES` (`meta_learning.py`) extended with `avwap_high`,
+  `avwap_low`, `dist_to_avwap_high_pct`, `dist_to_avwap_low_pct`,
+  `avwap_signal`, `rs_score`, `rs_5d`, `rs_20d`, `sector_etf` so future
+  online retraining sees the same vector live agents see.
+- `run_agents_sync` now lifts the SectorRS vote extras (`rs_score`,
+  `rs_5d`, `rs_20d`, `sector_etf`) back into `ind` immediately after
+  the agent runs, so MLAgent and the snapshot capture them cleanly.
+
+**Frontend (`mockups/TradingDashboard.tsx`):**
+- All "10-AGENT" strings → "12-AGENT", "/10" denominators → "/12",
+  "6 of 10 must agree" → "7 of 12 must agree" (incl. empty-state copy).
+
+**Smoke-tested live (post-restart):**
+- `/api/health` returns `{"agents":13, "version":"7.0-sector-rs-and-macro-regime"}`.
+- SPY swing → BUY_CALL @ 88.4% with all 12 agents voting; Market Regime
+  reports `bull`, VIX 18.7, golden_cross True; Sector RS correctly
+  HOLDs (SPY is its own benchmark).
+- META swing → `avwap_signal=0.647`, `sector_etf=XLC`, `rs_score=−0.513`.
+- NVDA swing → `sector_etf=XLK`, `rs_score=−9.295` (NVDA underperforming
+  the chip basket — exactly the kind of macro context older versions
+  missed).
 
 ## v6.9 — New alpha sources, agent-diversity bonus, ADX bug fix
 A focused accuracy upgrade on top of v6.8 that adds documented short-horizon

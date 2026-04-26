@@ -125,6 +125,10 @@ SNAPSHOT_FEATURES = [
     "nr4", "nr7", "range_compression", "inside_bar", "change_5d",
     "vp_poc", "vp_position", "vp_above_poc",
     "hurst", "regime_kind",
+    # v7.0 — anchored VWAP & sector relative-strength
+    "avwap_high", "avwap_low",
+    "dist_to_avwap_high_pct", "dist_to_avwap_low_pct", "avwap_signal",
+    "rs_score", "rs_5d", "rs_20d", "sector_etf",
 ]
 
 
