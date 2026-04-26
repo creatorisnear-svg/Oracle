@@ -954,7 +954,7 @@ Enable MagicDNS in the Tailscale admin console (https://login.tailscale.com/admi
 The free yfinance API throttles aggressively. Solutions:
 - Spread requests over more time (Oracle's existing cache helps)
 - Add a small `time.sleep(0.3)` between bulk fetches
-- Eventually move to a paid feed (Polygon $29/mo) — but not required for v1
+- Add longer waits between bulk fetches in your code if you scale up symbols
 
 ### "Server fans are jet-engine loud"
 R740xd XLs run their fans at 100% under any load. Solutions:
@@ -1003,13 +1003,14 @@ done
 
 ---
 
-## What's next (after this is running)
+## What's next (after this is running) — all free
 
-Once Oracle is humming on the cluster, the next high-leverage upgrades:
+Once Oracle is running on the cluster, the next free upgrades:
 
-1. **Real data feeds for Tier 1 agents** — wire up FRED API (free, register at https://fred.stlouisfed.org/docs/api/api_key.html), SEC EDGAR Form 4 RSS, FINRA short interest
-2. **Postgres-backed predictions read path** — refactor `signal_persistence.py` to query Postgres instead of SQLite
-3. **Per-tier agent containers** — split the 30 agents across Server 2's CPU cores
-4. **Polygon.io paid feed ($29/mo)** — gives real options chain + L1 quotes for Tier-3 agents to graduate from proxy mode
+1. **FRED API for macro data** — free, register at https://fred.stlouisfed.org/docs/api/api_key.html. Wires the Yield Curve and Macro Events agents.
+2. **SEC EDGAR Form 4 RSS** — free, no key needed. Wires the Insider Trading agent with real filings.
+3. **FINRA short interest** — free public CSV downloads. Wires the Short Interest agent with real bi-monthly numbers.
+4. **Postgres-backed predictions read path** — refactor `signal_persistence.py` to query Postgres instead of SQLite, so all 5 servers see the same prediction history.
+5. **Per-tier agent containers** — split the 30 agents across Server 2's CPU cores so the API server stays snappy.
 
-Each of those is a separate task — keep the rack running this baseline first to validate the hardware works for you, then layer on.
+Every one of these is free. Keep the rack running this baseline first to make sure the hardware works for you, then layer on the data sources one at a time.
