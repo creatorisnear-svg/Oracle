@@ -476,6 +476,172 @@ def _fundamentals(sym: str) -> dict:
     return result
 
 
+def _yield_curve() -> dict:
+    """Treasury yield curve snapshot (free, derived from yfinance ^TNX/^IRX/^FVX).
+    Cached 30 min — yields move slowly intraday.
+
+    Yahoo quotes these as "yield × 10" (e.g. 4.5% prints as 45.00). We divide
+    back to the actual percentage so the YieldCurveAgent sees real numbers.
+
+    Returns {ten_year, two_year, three_month, ten_year_change_5d}.
+    Two-year is approximated from ^FVX (5-yr) since Yahoo has no clean 2-yr
+    feed; the 10y-3m slope (the NY Fed's official recession indicator) uses
+    real data on both legs."""
+    key = ("__MACRO__", "yield_curve")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 1800:
+        return cached[0]
+
+    def _yld(ticker):
+        try:
+            d = yf.Ticker(ticker).history(period="1mo", interval="1d")
+            if d.empty or len(d) < 6:
+                return None, None
+            closes = d["Close"].values
+            v = float(closes[-1]) / 10.0          # ^TNX is yield × 10
+            v_5d = float(closes[-6]) / 10.0
+            return v, v - v_5d
+        except Exception:
+            return None, None
+
+    result = {}
+    try:
+        ten, ten_chg = _yld("^TNX")
+        five, _ = _yld("^FVX")
+        three_mo, _ = _yld("^IRX")
+        if ten is not None and three_mo is not None:
+            result = {
+                "ten_year": round(ten, 3),
+                # ^FVX (5-yr) is the cleanest free proxy for the short-end of
+                # the curve. Slope_2_10 below is computed from it; slope_3m_10
+                # is the more official recession indicator using real data.
+                "two_year": round(five, 3) if five is not None else round(three_mo, 3),
+                "three_month": round(three_mo, 3),
+                "ten_year_change_5d": round(ten_chg or 0, 3),
+            }
+    except Exception as e:
+        result = {"_error": str(e)}
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _analyst_ratings(sym: str, info: dict | None = None) -> dict:
+    """Wall-Street analyst consensus from yfinance .info + .recommendations.
+    Cached 4 h — analyst actions don't move intraday and the recommendations
+    DataFrame is the slowest call in the bunch.
+
+    Returns the shape AnalystRatingsAgent expects:
+      {recommendation_mean, target_mean_price, number_of_analysts,
+       upgrades_30d, downgrades_30d}.
+    All keys default to 0 / "" when data is unavailable so the agent cleanly
+    HOLDs instead of crashing."""
+    key = (sym.upper(), "_analyst_ratings")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 14400:
+        return cached[0]
+
+    result = {
+        "recommendation_mean": 0.0,
+        "target_mean_price": 0.0,
+        "number_of_analysts": 0,
+        "upgrades_30d": 0,
+        "downgrades_30d": 0,
+    }
+    try:
+        if info is None:
+            info = yf.Ticker(sym).info or {}
+        result["recommendation_mean"] = float(info.get("recommendationMean") or 0)
+        result["target_mean_price"] = float(info.get("targetMeanPrice") or 0)
+        result["number_of_analysts"] = int(info.get("numberOfAnalystOpinions") or 0)
+
+        # Upgrade/downgrade history from ticker.recommendations (Buy/Sell counts)
+        try:
+            recs = yf.Ticker(sym).recommendations
+            if recs is not None and not recs.empty and "period" in recs.columns:
+                # The summary form has columns: period, strongBuy, buy, hold, sell, strongSell
+                # period 0m = current, -1m = 1 month ago, etc.
+                cur = recs[recs["period"] == "0m"]
+                prev = recs[recs["period"] == "-1m"]
+                if not cur.empty and not prev.empty:
+                    cur_buy = int(cur.iloc[0].get("strongBuy", 0)) + int(cur.iloc[0].get("buy", 0))
+                    prev_buy = int(prev.iloc[0].get("strongBuy", 0)) + int(prev.iloc[0].get("buy", 0))
+                    cur_sell = int(cur.iloc[0].get("sell", 0)) + int(cur.iloc[0].get("strongSell", 0))
+                    prev_sell = int(prev.iloc[0].get("sell", 0)) + int(prev.iloc[0].get("strongSell", 0))
+                    result["upgrades_30d"] = max(0, cur_buy - prev_buy)
+                    result["downgrades_30d"] = max(0, cur_sell - prev_sell)
+        except Exception:
+            pass
+    except Exception as e:
+        result["_error"] = str(e)
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
+def _insider_activity(sym: str) -> dict:
+    """Insider Form 4 transactions (buys/sells) over the last 90 days.
+    Free via yfinance ticker.insider_transactions. Cached 6 h — Form 4
+    filings come in slowly and don't move intraday.
+
+    Returns the shape InsiderTradingAgent expects:
+      {net_shares_90d, buy_count_90d, sell_count_90d, net_value_90d}."""
+    key = (sym.upper(), "_insider_activity")
+    cached = _DF_CACHE.get(key)
+    if cached and (time.time() - cached[2]) < 21600:
+        return cached[0]
+
+    result = {
+        "net_shares_90d": 0,
+        "buy_count_90d": 0,
+        "sell_count_90d": 0,
+        "net_value_90d": 0.0,
+    }
+    try:
+        import datetime as _dt
+        tx = yf.Ticker(sym).insider_transactions
+        if tx is not None and not tx.empty:
+            cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=90)
+            # Recent yfinance schema: columns include Insider, Position,
+            # 'Start Date', 'Ownership', 'Transaction', 'Shares', 'Value'.
+            # 'Transaction' values include 'Purchase', 'Sale', 'Sale (Multiple)'.
+            buys, sells, net_sh, net_val = 0, 0, 0, 0.0
+            for _, row in tx.iterrows():
+                try:
+                    dt_val = row.get("Start Date")
+                    if dt_val is None:
+                        continue
+                    if hasattr(dt_val, "to_pydatetime"):
+                        dt_val = dt_val.to_pydatetime()
+                    if isinstance(dt_val, _dt.date) and not isinstance(dt_val, _dt.datetime):
+                        dt_val = _dt.datetime.combine(dt_val, _dt.time(0, 0, tzinfo=_dt.timezone.utc))
+                    if isinstance(dt_val, _dt.datetime) and dt_val.tzinfo is None:
+                        dt_val = dt_val.replace(tzinfo=_dt.timezone.utc)
+                    if not isinstance(dt_val, _dt.datetime) or dt_val < cutoff:
+                        continue
+                    txn = str(row.get("Transaction") or "").lower()
+                    shares = int(row.get("Shares") or 0)
+                    value = float(row.get("Value") or 0)
+                    if "purchase" in txn or "buy" in txn:
+                        buys += 1
+                        net_sh += shares
+                        net_val += value
+                    elif "sale" in txn or "sell" in txn:
+                        sells += 1
+                        net_sh -= shares
+                        net_val -= value
+                except Exception:
+                    continue
+            result = {
+                "net_shares_90d": net_sh,
+                "buy_count_90d": buys,
+                "sell_count_90d": sells,
+                "net_value_90d": net_val,
+            }
+    except Exception as e:
+        result["_error"] = str(e)
+    _DF_CACHE[key] = (result, None, time.time())
+    return result
+
+
 def _earnings_proximity(sym: str) -> dict:
     """How many calendar days until the next earnings release.
 
@@ -649,6 +815,13 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
     ind["fundamentals"] = _fundamentals(sym)
     ind["short_squeeze"] = _short_squeeze_score(sym, ind)
     ind["earnings"] = _earnings_proximity(sym)
+    # v7.1.1: wire the previously-dormant Tier-1 agents to free public data
+    # so they stop returning HOLD on every symbol. Each helper caches
+    # aggressively (30 min – 6 h) and degrades to {} on fetch failure, which
+    # the agents handle by HOLDing — no crashes, no fake votes.
+    ind["yield_curve"] = _yield_curve()
+    ind["analyst_ratings"] = _analyst_ratings(sym, info=info)
+    ind["insider_activity"] = _insider_activity(sym)
     weights = LEARNING.get_weights()
 
     # Meta-learning multipliers (per regime + per symbol + per horizon).
@@ -800,7 +973,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.1.0-30-agent-expansion"}
+    return {"status": "ok", "agents": len(AGENTS) + 1, "version": "7.1.1-data-wired"}
 
 
 @app.get("/api/ml-stats")

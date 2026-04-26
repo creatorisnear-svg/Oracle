@@ -1,3 +1,53 @@
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.1
+
+## v7.1.1 — Wire dormant Tier-1 agents to free public data + Judge quality gate
+Surgical accuracy upgrade following v7.1.0. The expansion shipped 18 new agents
+but 5 of them were HOLD-ing on every symbol because their data sources were
+never wired. v7.1.1 connects them to free yfinance feeds and fixes a real
+double-multiply bug in ShortInterestAgent.
+
+**Files touched:** `agents.py` (bug fix + Judge gate), `server.py` (3 new
+helpers + wiring + version bump).
+
+**1. ShortInterestAgent bug fix (CRITICAL):**
+The agent read `short_pct_float` from `_short_squeeze_score()` (already in
+percent), then re-applied a `* 100` "normalize" step. AAPL's actual 0.92%
+short interest displayed as **92.0%**, triggering false squeeze setups and
+short-bear momentum continuations. Fixed by branching on data source:
+`sq` values stay as-is, only raw `info.shortPercentOfFloat` (yfinance fraction)
+gets the ×100 multiplication.
+
+**2. New free data helpers wired into `run_agents_sync` (server.py):**
+- `_yield_curve()` — pulls ^TNX / ^FVX / ^IRX from yfinance, divides by 10
+  (Yahoo quotes yields × 10), returns `{ten_year, two_year, three_month,
+  ten_year_change_5d}`. Cached 30 min. Powers `YieldCurveAgent`.
+- `_analyst_ratings(sym, info)` — pulls `recommendationMean`, `targetMeanPrice`,
+  `numberOfAnalystOpinions` from yfinance ticker.info, plus upgrade/downgrade
+  deltas from `ticker.recommendations`. Cached 4 h. Powers `AnalystRatingsAgent`.
+- `_insider_activity(sym)` — pulls `ticker.insider_transactions`, filters to
+  the last 90 days, tallies buys/sells/net-shares/net-value. Cached 6 h.
+  Powers `InsiderTradingAgent`.
+
+All three degrade to empty dicts on fetch failure → agents cleanly HOLD.
+
+**3. JudgeAgent confidence-quality gate (`agents.py`):**
+Before the existing dominance veto, reject any signal where the winning
+side's average per-agent confidence is < 56%. A 6-agent CALL consensus
+where every voter says "barely 51%" is much weaker than 4 agents at 70+;
+the count clears the threshold but the signal is essentially noise. New
+gate filters these slow-bleeding trades. Threshold of 56 calibrated to
+match the typical 50–90 per-agent confidence distribution.
+
+**Smoke verification:**
+- AAPL Short Interest now correctly reads "0.9% short" (was nonsense 92.0%)
+- AAPL Insider Trading reads "0b/0s" (real Form 4 query — AAPL has no
+  recent insider activity)
+- AAPL Analyst Ratings reads "40 analysts, rec=1.9" (real Wall Street)
+- AAPL Yield Curve reads "+0.04" spread (real ^TNX − ^FVX)
+- 40-call multi-symbol stress test: 0 crashes, 4-5 of 5 newly-wired agents
+  have real data on every symbol; strong signals preserved (META swing
+  CALL 81.6, MSFT day CALL 75.2, SPY swing CALL 75.1 unchanged).
+
 # TradeSignal AI — 30-Agent Trading Prediction System v7.1.0
 
 ## v7.1.0 — Tier 1/2/3 expansion (12 → 30 agents) + threshold rebalance

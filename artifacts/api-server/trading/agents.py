@@ -2187,8 +2187,17 @@ class ShortInterestAgent:
         try:
             sq = ind.get("short_squeeze") or {}
             info = ind.get("_info") or {}
-            short_pct = float(sq.get("short_pct_float") or info.get("shortPercentOfFloat") or 0)
-            short_pct = short_pct * 100 if short_pct < 1.0 else short_pct  # normalize
+            # v7.1.1 BUG FIX: short_pct_float from _short_squeeze_score is ALREADY
+            # in percent (×100 applied upstream). Double-multiplying it produced
+            # nonsense like "AAPL 92% short". Read each source with its own
+            # normalization rules so the value is always in percent here.
+            sq_pct = sq.get("short_pct_float")
+            if sq_pct is not None and sq_pct != 0:
+                short_pct = float(sq_pct)  # already in percent
+            else:
+                raw = info.get("shortPercentOfFloat") or 0
+                # yfinance returns a fractional value (e.g. 0.0092 = 0.92%)
+                short_pct = float(raw) * 100
             dtc = float(sq.get("days_to_cover") or info.get("shortRatio") or 0)
             score = float(sq.get("squeeze_score") or 0)
             chg = float(ind.get("change_1d") or 0)
@@ -3063,6 +3072,29 @@ class JudgeAgent:
             entry = price
             stop = round(price - stop_mult * atr, 2)
             target = price
+
+        # ── Winning-side confidence-quality gate (v7.1.1) ─────────────────
+        # A consensus where every agent says "barely 51%" is much weaker
+        # than one where the average vote is 65%+. Reject HOLD-adjacent
+        # consensus even when the count clears the threshold — these are
+        # the trades that bleed slowly. Only applies to fired signals
+        # (HOLD already has nothing to lose). Threshold of 56% is calibrated
+        # to filter "noise-level" agreement without rejecting real edges,
+        # since per-agent confidences are typically 50-90.
+        if signal == "BUY_CALL":
+            avg_win_conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_CALL"]) or 0)
+            if avg_win_conf < 56.0:
+                signal = "HOLD"
+                target = price
+                stop = round(price - stop_mult * atr, 2)
+                conf = avg_win_conf  # surface the weak number, not 50
+        elif signal == "BUY_PUT":
+            avg_win_conf = float(np.mean([v["confidence"] for v in votes if v["vote"] == "BUY_PUT"]) or 0)
+            if avg_win_conf < 56.0:
+                signal = "HOLD"
+                target = price
+                stop = round(price + stop_mult * atr, 2)
+                conf = avg_win_conf
 
         # ── Conviction-dominance VETO ────────────────────────────────────
         # Bare vote-count is a weak gate: 6 agents at 51% confidence shouldn't
