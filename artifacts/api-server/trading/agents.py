@@ -584,9 +584,13 @@ class VolumeAgent:
                 signals.append("BUY_CALL"); reasons.append(f"Accumulation ratio {up_dn:.2f}×")
             elif up_dn < 0.7:
                 signals.append("BUY_PUT"); reasons.append(f"Distribution ratio {up_dn:.2f}×")
-            if vol_trend > 1.3:
+            if vol_trend > 1.3 and ch != 0:
                 reasons.append(f"Volume building {vol_trend:.1f}×")
                 signals.append("BUY_CALL" if ch > 0 else "BUY_PUT")
+            elif vol_trend > 1.3:
+                # v7.1.6: flat session — building volume with no directional move
+                # is interest, not direction. Don't cast a phantom bearish vote.
+                reasons.append(f"Volume building {vol_trend:.1f}× (flat — no direction)")
             if vc == "confirms" and ch > 0:
                 signals.append("BUY_CALL"); reasons.append("Vol confirms bullish")
             elif vc == "confirms" and ch < 0:
@@ -1701,11 +1705,19 @@ def compute_target_hit_probability(
     # When `bars` is given (intraday/swing) we use bar-based math so the
     # window is correct for ANY interval (5m, 15m, 1h, 1d).
     n_bars = int(bars) if bars and bars > 0 else int(days)
-    sigma_per_bar = atr / price
-    distance_pct = abs(target - price) / price
-    z = distance_pct / (sigma_per_bar * math.sqrt(max(n_bars, 1)))
-    p_base = 2.0 * (1.0 - norm.cdf(z))
-    p_base = max(0.05, min(0.95, p_base))
+    # v7.1.6: defensive guards. atr=0 (illiquid/halted/missing data) or price=0
+    # both caused divide-by-zero/NaN that propagated into the final probability.
+    # When we have no volatility signal, fall back to a wide, neutral 50% prior
+    # (treats target as roughly coin-flip rather than crashing the request).
+    if price and price > 0 and atr and atr > 0:
+        sigma_per_bar = atr / price
+        distance_pct = abs(target - price) / price
+        denom = sigma_per_bar * math.sqrt(max(n_bars, 1))
+        z = (distance_pct / denom) if denom > 0 else 0.0
+        p_base = 2.0 * (1.0 - norm.cdf(z))
+        p_base = max(0.05, min(0.95, p_base))
+    else:
+        p_base = 0.50
 
     # ── B. Directional alignment score in [-1, +1] ──────────────────
     is_call = (signal == "BUY_CALL")
@@ -3711,6 +3723,15 @@ class JudgeAgent:
             }
 
         conf = max(40.0, min(95.0, conf))
+
+        # v7.1.6: HOLD has no direction, so it shouldn't carry a directional
+        # stop/target. Several upstream branches set stop = price - stop_mult*atr
+        # (the CALL formula) when downgrading to HOLD, which produced a phantom
+        # "stop $179.42 / entry $182.06" pair on non-trades and confused the UI.
+        # Pin both to entry on HOLD so the dashboard reads "no trade" cleanly.
+        if signal == "HOLD":
+            stop = price
+            target = price
 
         direction = "BULLISH" if signal == "BUY_CALL" else "BEARISH" if signal == "BUY_PUT" else "NEUTRAL"
         # Strike now picked from real CBOE tick increments and tilted ITM/ATM

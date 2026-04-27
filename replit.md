@@ -1,4 +1,64 @@
-# TradeSignal AI — 30-Agent Trading Prediction System v7.1.5
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.6
+
+## v7.1.6 — Three more bugs from the second sweep
+
+After the v7.1.5 audit, did another deep pass. Found three more real
+issues — one numerical-stability landmine, one repeat of the silent-bias
+pattern in a different agent, and one cosmetic but confusing UI artifact.
+
+**1. `compute_target_hit_probability` divide-by-zero (`agents.py:1706-1719`).**
+Computed `sigma_per_bar = atr / price` with no guard. If `atr` is 0
+(happens on freshly halted stocks, brand-new IPOs with <14 bars of
+history, or when the indicator pipeline returns `None` and gets coerced
+to 0), the next line `z = distance / (sigma·√N)` divides by zero and
+produces `inf`/`NaN`, which then silently propagates into the final
+probability and corrupts the alignment-weighted breakdown. Now guards
+both `atr > 0` and `price > 0`; if either is missing, the base
+probability falls back to 50% (neutral coin-flip) instead of NaN.
+
+**2. VolumeAgent flat-day default-bias (`agents.py:590-596`).**
+Same pattern as the SuperTrend bug from v7.1.5. The "volume is building"
+branch did `signals.append("BUY_CALL" if ch > 0 else "BUY_PUT")` —
+which means on a perfectly flat session (`change_1d == 0`, common on
+illiquid names or weekend/pre-market reads), it ALWAYS appended a
+phantom BUY_PUT. Now requires `ch != 0` before casting a directional
+vote; on flat days it just notes "volume building (no direction)"
+without voting.
+
+**3. JudgeAgent HOLD signals showed phantom stop-loss (`agents.py:3730-3737`).**
+A dozen upstream branches in the JudgeAgent set `stop = price - stop_mult * atr`
+(the CALL formula) when downgrading a signal to HOLD. The result: every
+HOLD response carried a stop-loss displayed BELOW the entry price — e.g.
+`stop $179.42 / entry $182.06 / target $182.06` — which the dashboard
+rendered as a real risk band on a non-trade. Pinned both stop and
+target to the entry price on HOLD, so the API now cleanly reports
+"no trade, no risk band" instead of confusing the UI.
+
+**Verification (8 tickers, all stop/entry/target relationships sane,
+0 NaN, 0 exceptions, all 30 agents firing):**
+```
+AAPL/swing      BUY_CALL @65.0  S/E/T = 269.19 / 271.06 / 273.05  [stop<entry<target ✓]
+TSLA/swing      HOLD     @52.2  S/E/T = 376.16 / 376.16 / 376.16  [pinned ✓]
+NVDA/swing      BUY_CALL @81.9  S/E/T = 205.97 / 208.19 / 210.56  [✓]
+META/swing      BUY_CALL @72.8  S/E/T = 668.05 / 674.89 / 682.21  [✓]
+SPY/swing       BUY_CALL @79.7  S/E/T = 711.26 / 713.98 / 716.89  [✓]
+GOOGL/swing     HOLD     @50.0  S/E/T = 344.29 / 344.29 / 344.29  [pinned ✓]
+BAC/swing       BUY_PUT  @73.0  S/E/T =  52.38 /  52.04 /  51.68  [target<entry<stop ✓]
+AMD/intraday    BUY_CALL @72.3  S/E/T = 346.61 / 347.76 / 348.86  [✓]
+```
+
+**Things audited and confirmed clean (false alarms from the sweep):**
+- TechnicalAgent's `aroon.get("osc")` reads — key matches indicators.py.
+- `compute_rsi`, `compute_adx`, `compute_vwap` — all already use `np.where`
+  guards against zero denominators.
+- TechnicalAgent HMA branch — symmetric (has both bull and bear elif).
+- OptionsFlowAgent SuperTrend reads — explicit `"up"`/`"down"` checks.
+
+**No deployment / setup impact.** Same as v7.1.5: edits limited to
+`agents.py`. No new dependencies, no schema changes, no env-vars,
+no new files. Dell R740xd + Oracle cluster bootstrap script and the
+deployment guide remain valid — your `git pull && systemctl restart`
+flow on the box still works.
 
 ## v7.1.5 — Six accuracy bug fixes (silent biases & broken parsers)
 
