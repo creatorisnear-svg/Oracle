@@ -426,6 +426,19 @@ export default function TradingDashboard() {
       try { chartRef.current.remove(); } catch {}
       chartRef.current = null;
     }
+    // v7.1.7: lightweight-charts attaches its own internal ResizeObserver
+    // to the canvas inside this container. Even after .remove(), a queued
+    // observer callback can still fire one more time and throw "Object is
+    // disposed". Detaching the canvas children right after dispose makes
+    // the observer's element non-existent so the queued callback no-ops
+    // instead of crashing the dev runtime-error overlay.
+    if (chartContainerRef.current) {
+      try {
+        while (chartContainerRef.current.firstChild) {
+          chartContainerRef.current.removeChild(chartContainerRef.current.firstChild);
+        }
+      } catch {}
+    }
     candleRef.current = null;
     forecastRef.current = null;
     postForecastRef.current = null;

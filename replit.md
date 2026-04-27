@@ -1,4 +1,38 @@
-# TradeSignal AI — 30-Agent Trading Prediction System v7.1.6
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.7
+
+## v7.1.7 — Frontend "Object is disposed" runtime-error overlay
+
+The dev runtime-error overlay was crashing on a known lightweight-charts
+race: when the chart is `.remove()`d (HMR reload, symbol switch, period
+switch), the browser still has one queued ResizeObserver callback in its
+internal queue. That callback fires once after disposal, tries to access
+the now-freed canvas binding inside `DevicePixelContentBoxBinding`, and
+throws `Error: Object is disposed`. The chart is already gone — the
+error is harmless library noise — but `@replit/vite-plugin-runtime-error-modal`
+catches it and shows the red overlay, making the app appear broken.
+
+**Two-part fix:**
+
+1. **`disposeChart` now also detaches the container's child nodes
+   (`TradingDashboard.tsx:432-444`).** After `chart.remove()`, the
+   internal observer's element no longer exists in the DOM, so the
+   queued callback no-ops instead of touching freed memory. This is
+   the structural fix.
+
+2. **Global filter for the specific noise (`main.tsx:4-26`).** Belt-and-
+   suspenders: a `window.error` + `unhandledrejection` listener that
+   matches ONLY the literal string `"Object is disposed"` and calls
+   `preventDefault` so the dev overlay ignores it. All other errors
+   (real bugs) still surface normally.
+
+**Verification:** Frontend reloads cleanly, chart renders with all
+candles + EMAs + VWAP + volume bars + pattern markers, browser console
+shows only the vite-connected message and the React-DevTools tip — no
+runtime errors. HMR reloads no longer trigger the red overlay.
+
+**No deployment / setup impact.** Two TypeScript files in the frontend.
+No new packages, no API/server/data changes. The Dell R740xd + Oracle
+cluster instructions remain valid.
 
 ## v7.1.6 — Three more bugs from the second sweep
 
