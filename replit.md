@@ -11,28 +11,39 @@ throws `Error: Object is disposed`. The chart is already gone — the
 error is harmless library noise — but `@replit/vite-plugin-runtime-error-modal`
 catches it and shows the red overlay, making the app appear broken.
 
-**Two-part fix:**
+**First attempt** — added a filter in `main.tsx`. Didn't work: the dev
+runtime-error plugin injects its `window.addEventListener("error", …)`
+via a `type="module"` script during `transformIndexHtml`. Module scripts
+are ALWAYS deferred until after document parse — and `main.tsx` is also
+a module script — so by the time React's main.tsx ran, the plugin's
+listener was already installed and `addEventListener` registration order
+made the plugin fire first regardless of `capture: true`.
 
-1. **`disposeChart` now also detaches the container's child nodes
+**Final fix (working):**
+
+1. **`disposeChart` detaches the container's child nodes
    (`TradingDashboard.tsx:432-444`).** After `chart.remove()`, the
-   internal observer's element no longer exists in the DOM, so the
-   queued callback no-ops instead of touching freed memory. This is
-   the structural fix.
+   library's internal ResizeObserver no longer has an element to report
+   on, so the queued callback no-ops instead of throwing. Structural fix.
 
-2. **Global filter for the specific noise (`main.tsx:4-26`).** Belt-and-
-   suspenders: a `window.error` + `unhandledrejection` listener that
-   matches ONLY the literal string `"Object is disposed"` and calls
-   `preventDefault` so the dev overlay ignores it. All other errors
-   (real bugs) still surface normally.
+2. **Filter installed as a CLASSIC inline `<script>` at the top of
+   `<head>` in `index.html` (lines 13-45).** Classic (non-module) inline
+   scripts execute SYNCHRONOUSLY during HTML parse, so they register
+   listeners before any `type="module"` script — including the dev
+   runtime-error plugin's injected one. The filter matches ONLY the
+   literal string `"Object is disposed"` and calls `preventDefault()` +
+   `stopImmediatePropagation()` (with `capture: true`) so the plugin's
+   listener never receives the event. Every other error still surfaces
+   normally.
 
-**Verification:** Frontend reloads cleanly, chart renders with all
-candles + EMAs + VWAP + volume bars + pattern markers, browser console
-shows only the vite-connected message and the React-DevTools tip — no
-runtime errors. HMR reloads no longer trigger the red overlay.
+**Verification:** Frontend log shows ZERO `[RUNTIME_ERROR]` entries
+across page reloads, symbol switches, and HMR cycles. Browser console
+shows only the standard vite-connecting/connected messages. Chart
+renders cleanly with all overlays.
 
-**No deployment / setup impact.** Two TypeScript files in the frontend.
-No new packages, no API/server/data changes. The Dell R740xd + Oracle
-cluster instructions remain valid.
+**No deployment / setup impact.** Three frontend files (`index.html`,
+`main.tsx`, `TradingDashboard.tsx`). No new packages, no API/server/data
+changes. The Dell R740xd + Oracle cluster instructions remain valid.
 
 ## v7.1.6 — Three more bugs from the second sweep
 

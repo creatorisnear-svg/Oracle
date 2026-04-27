@@ -7,6 +7,39 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+    <!--
+      v7.1.7 — Filter the lightweight-charts "Object is disposed" noise
+      BEFORE the dev runtime-error overlay's listeners get installed.
+      The overlay plugin injects its listeners via a type="module" script,
+      which is deferred until after document parse. This classic inline
+      <script> runs synchronously during parse, so it registers first
+      and prevents the harmless library-internal disposal race from
+      surfacing as a fatal red overlay. All other errors still surface.
+    -->
+    <script>
+      (function () {
+        function isLwcDisposalNoise(msg) {
+          return typeof msg === "string" && msg.indexOf("Object is disposed") !== -1;
+        }
+        window.addEventListener("error", function (e) {
+          var m = e && (e.message || (e.error && e.error.message));
+          if (isLwcDisposalNoise(m)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return false;
+          }
+        }, true);
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e && e.reason;
+          var m = typeof r === "string" ? r : (r && r.message);
+          if (isLwcDisposalNoise(m)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return false;
+          }
+        }, true);
+      })();
+    </script>
 
     <meta property="og:title" content="Mockup Canvas" />
     <meta property="og:description" content="UI prototyping sandbox with infinite canvas" />
