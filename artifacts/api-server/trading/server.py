@@ -640,14 +640,35 @@ def _insider_activity(sym: str) -> dict:
                         dt_val = dt_val.replace(tzinfo=_dt.timezone.utc)
                     if not isinstance(dt_val, _dt.datetime) or dt_val < cutoff:
                         continue
+                    # v7.1.5 BUG FIX: yfinance changed schema — the
+                    # Transaction column is now empty strings; the actual
+                    # buy/sell type is in the Text field
+                    # ("Sale at price...", "Purchase at price...",
+                    # "Conversion of...", etc.). Pre-fix every stock
+                    # showed 0b/0s and the agent never fired.
                     txn = str(row.get("Transaction") or "").lower()
+                    text = str(row.get("Text") or "").lower()
+                    combined = (txn + " " + text).strip()
                     shares = int(row.get("Shares") or 0)
-                    value = float(row.get("Value") or 0)
-                    if "purchase" in txn or "buy" in txn:
+                    val_raw = row.get("Value")
+                    try:
+                        value = float(val_raw) if val_raw is not None else 0.0
+                        if value != value:  # NaN check
+                            value = 0.0
+                    except (TypeError, ValueError):
+                        value = 0.0
+                    is_buy = ("purchase" in combined or
+                              ("buy" in combined and "buyer" not in combined))
+                    is_sell = "sale" in combined or "sell" in combined or "disposition" in combined
+                    # "Conversion of derivative" / "Exercise" → option exercise,
+                    # not a discretionary directional bet — skip.
+                    if "conversion" in combined or "exercise" in combined:
+                        continue
+                    if is_buy:
                         buys += 1
                         net_sh += shares
                         net_val += value
-                    elif "sale" in txn or "sell" in txn:
+                    elif is_sell:
                         sells += 1
                         net_sh -= shares
                         net_val -= value
@@ -1065,7 +1086,15 @@ def run_agents_sync(sym: str, df: pd.DataFrame, info: dict, horizon: str = DEFAU
         # h_cfg["key"] which resolves to the same thing.
         hw = horizon_mults.get((agent.name, horizon), 1.0)
         eff_w = w * rw * sw * hw
-        vote["confidence"] = round(min(vote.get("confidence", 50) * eff_w, 97), 1)
+        # v7.1.5 BUG FIX: only weight-scale DIRECTIONAL votes. HOLD has no
+        # direction, so multiplying its 50% by an agent's track-record
+        # weight produced meaningless 40-55% confidences that polluted the
+        # downstream avg_win_conf gate AND made low-weighted agents look
+        # "bearishly biased on every neutral call". HOLD always = 50%.
+        if vote.get("vote") in ("BUY_CALL", "BUY_PUT"):
+            vote["confidence"] = round(min(vote.get("confidence", 50) * eff_w, 97), 1)
+        else:
+            vote["confidence"] = 50.0
         vote["weight"] = round(eff_w, 3)
         vote["weight_breakdown"] = {
             "base": round(w, 3),

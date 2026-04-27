@@ -314,9 +314,13 @@ class PriceActionAgent:
                 elif highs[-1] < highs[-5] and lows[-1] < lows[-5]:
                     signals.append("BUY_PUT"); reasons.append("Lower highs + lows (downtrend)")
             # SuperTrend
-            if ind.get("supertrend_dir") == "up":
+            # v7.1.5 BUG FIX: previously defaulted to BUY_PUT when supertrend_dir
+            # was missing/None — silent bearish bias on every stock with weak
+            # trend signal. Now requires an explicit "up" or "down".
+            st_dir = str(ind.get("supertrend_dir") or "").lower()
+            if st_dir == "up":
                 signals.append("BUY_CALL"); reasons.append("SuperTrend bullish")
-            else:
+            elif st_dir == "down":
                 signals.append("BUY_PUT"); reasons.append("SuperTrend bearish")
             # Pivot breakout
             pivot_bias = ind.get("pivot_bias", "neutral")
@@ -423,14 +427,32 @@ class PriceActionAgent:
 
             calls = signals.count("BUY_CALL")
             puts = signals.count("BUY_PUT")
-            total = max(calls + puts, 1)
-            conf = 55 + (max(calls, puts) / total) * 30
-            r = " | ".join(reasons[:3])
-            if calls > puts:
+            total = calls + puts
+            # v7.1.5: require ≥2-signal margin AND ≥60% dominance to fire,
+            # otherwise HOLD. Previously a 5-vs-4 split (only 56%) fired with
+            # 71% confidence — that's noise, not signal. The aggregator was
+            # also picking the FIRST 3 reasons regardless of which side won,
+            # so the displayed reasoning often contradicted the vote
+            # (e.g. "SuperTrend bullish | H&S top neckline break | PSAR bearish"
+            # but the agent voted BUY_PUT). Now we show the winning side's
+            # top reasons.
+            if total == 0:
+                return _hold(self.name, self.emoji, "No directional pattern")
+            win = max(calls, puts)
+            dom = win / total
+            margin = abs(calls - puts)
+            # Pair each reason with its signal so we can filter by winning side
+            paired = list(zip(signals, reasons))
+            if calls > puts and margin >= 2 and dom >= 0.60:
+                conf = 55 + dom * 28  # 55% (60% dom) → 83% (100% dom)
+                r = " | ".join(rsn for sig, rsn in paired if sig == "BUY_CALL")[:160] or "Bullish patterns"
                 return _vote(self.name, self.emoji, "BUY_CALL", conf, r)
-            elif puts > calls:
+            elif puts > calls and margin >= 2 and dom >= 0.60:
+                conf = 55 + dom * 28
+                r = " | ".join(rsn for sig, rsn in paired if sig == "BUY_PUT")[:160] or "Bearish patterns"
                 return _vote(self.name, self.emoji, "BUY_PUT", conf, r)
-            return _hold(self.name, self.emoji, r or "No clear pattern")
+            return _hold(self.name, self.emoji,
+                         f"Mixed patterns ({calls}↑/{puts}↓) — no edge")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Error: {e}")
 
@@ -1274,7 +1296,13 @@ class PoliticalAgent:
                 return _hold(self.name, self.emoji, "Politically neutral news cycle")
 
             ratio = bull / total
-            conf = 54 + abs(bull - bear) / max(total, 1) * 28
+            # v7.1.5: capped at 60 (was 82). Political news is a market-wide
+            # signal applied identically to every individual stock — it
+            # shouldn't carry the same weight as a stock-specific edge. The
+            # cap keeps it influential when multiple agents agree but
+            # prevents one tariff headline from outweighing real per-name
+            # technicals on every ticker.
+            conf = min(60.0, 50.0 + abs(bull - bear) / max(total, 1) * 18)
             headline_str = top_headlines[0][:50] if top_headlines else ""
 
             if ratio > 0.62:
@@ -1989,12 +2017,17 @@ class SectorRelativeStrengthAgent:
 
             # Strong leader → CALL bias. Strong laggard → PUT bias.
             # Threshold of 1.5% over the sector is the meaningful edge.
+            # v7.1.5: cap reduced 85 → 72. Sector RS is one momentum signal
+            # among 30 — it shouldn't fire 85% conviction by itself,
+            # especially since lagging stocks often catch up (mean-revert)
+            # rather than continue lower. The conviction-weight gate in the
+            # Judge then weighs it against opposing agents fairly.
             if rs_score >= 1.5:
-                conf = min(85.0, 58.0 + abs(rs_score) * 4.0 + persistence_bonus)
+                conf = min(72.0, 56.0 + abs(rs_score) * 2.5 + persistence_bonus)
                 return {**_vote(self.name, self.emoji, "BUY_CALL", conf,
                                 f"Leading {etf} — {reason}"), **base_extra}
             elif rs_score <= -1.5:
-                conf = min(85.0, 58.0 + abs(rs_score) * 4.0 + persistence_bonus)
+                conf = min(72.0, 56.0 + abs(rs_score) * 2.5 + persistence_bonus)
                 return {**_vote(self.name, self.emoji, "BUY_PUT", conf,
                                 f"Lagging {etf} — {reason}"), **base_extra}
             else:
@@ -2885,13 +2918,21 @@ class ETFFlowAgent:
             if spread < -2.0 and etf_chg < 0:
                 return _vote(self.name, self.emoji, "BUY_PUT", 62,
                              f"Lagging {etf}: stock {sym_chg:+.1f}% vs sector {etf_chg:+.1f}%")
-            # Divergence: stock moving opposite to sector — likely to revert
-            if spread > 3.0 and etf_chg < -1.0:
+            # Divergence: stock moving opposite to sector — possible mean
+            # reversion. v7.1.5: only fire the catch-up/revert signals when
+            # there's an OVERSOLD/OVERBOUGHT confirmation from RSI, otherwise
+            # momentum continuation is more likely than reversion. This was
+            # the source of a frequent contradiction with Sector RS Agent on
+            # the same data (e.g. AAPL lagging XLK: ETF Flow voted CALL
+            # "catch-up" while Sector RS voted PUT "continuation" — both
+            # 60%+ confidence, cancelling each other out).
+            rsi = float(ind.get("rsi14") or 50)
+            if spread > 3.0 and etf_chg < -1.0 and rsi >= 65:
                 return _vote(self.name, self.emoji, "BUY_PUT", 58,
-                             f"Stock decoupling +{spread:.1f}% above weak {etf} — revert risk")
-            if spread < -3.0 and etf_chg > 1.0:
+                             f"Stock decoupling +{spread:.1f}% above weak {etf} (RSI {rsi:.0f}) — revert risk")
+            if spread < -3.0 and etf_chg > 1.0 and rsi <= 40:
                 return _vote(self.name, self.emoji, "BUY_CALL", 58,
-                             f"Stock lagging {spread:.1f}% behind strong {etf} — catch-up")
+                             f"Stock lagging {spread:.1f}% behind strong {etf} (RSI {rsi:.0f} oversold) — catch-up")
             return _hold(self.name, self.emoji, f"In line with {etf} ({spread:+.1f}% spread)")
         except Exception as e:
             return _hold(self.name, self.emoji, f"Error: {e}")

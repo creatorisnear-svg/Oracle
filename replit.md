@@ -1,4 +1,78 @@
-# TradeSignal AI — 30-Agent Trading Prediction System v7.1.4
+# TradeSignal AI — 30-Agent Trading Prediction System v7.1.5
+
+## v7.1.5 — Six accuracy bug fixes (silent biases & broken parsers)
+
+After the threshold recalibration in v7.1.4, did a deep audit by dumping
+every agent's vote across 8 tickers and 3 horizons. Found six real bugs
+that were quietly degrading accuracy:
+
+**1. PriceActionAgent — silent bearish bias (`agents.py:319-327`).**
+The SuperTrend block used `if dir == "up": CALL else: PUT` — so when
+`supertrend_dir` was missing/None (which happens with intraday data on
+some tickers), it ALWAYS appended a phantom BUY_PUT vote. Net effect:
+every borderline-trending stock got a bearish nudge it didn't earn.
+Fixed by requiring an explicit "down" before voting bearish.
+
+**2. PriceActionAgent — reasons contradicted the vote (`agents.py:431-460`).**
+The aggregator counted CALL vs PUT signals fairly but then displayed the
+first 3 reasons regardless of which side won, producing nonsense like
+"SuperTrend bullish | H&S top neckline break | PSAR flipped bearish"
+on a BUY_PUT vote. Also fired with 71% confidence on a 5-vs-4 split
+(56% dominance — basically a coin flip). Now requires ≥2-vote margin
+AND ≥60% directional dominance, and shows only the WINNING side's reasons.
+
+**3. HOLD confidence weight-scaling (`server.py:1071-1079`).**
+Every vote's confidence was multiplied by the agent's learned weight,
+INCLUDING HOLDs. So a HOLD-50% from a 0.8-weight agent showed as 40%
+("slightly bearish abstain"), and the avg-winning-conf quality gate
+mistook the noise as a real-edge weakener. HOLD has no direction —
+its confidence is now hard-pinned at 50.0; only directional votes
+get track-record-weighted.
+
+**4. InsiderTradingAgent — yfinance schema change (`server.py:646-677`).**
+yfinance moved the buy/sell type from the `Transaction` column (now
+empty strings) into the `Text` field ("Sale at price 171.97...",
+"Purchase at price...", etc.). The agent was reading the empty
+column, so EVERY stock showed `0 buy / 0 sell` and the agent never
+fired. Now parses both fields and skips option-conversion entries
+(those aren't discretionary directional bets).
+
+**5. PoliticalAgent — over-weighted on individual stocks (`agents.py:1301-1308`).**
+Political news is a market-wide signal applied identically to every
+ticker. Its confidence was capped at 82, so a single tariff headline
+was outweighing real per-name technicals on every stock, casting the
+exact same BUY_PUT 61.5% vote on AAPL, MSFT, TSLA, SPY simultaneously.
+Capped at 60 — still influential when stacked with other agents,
+no longer dominates one-on-one.
+
+**6. SectorRSAgent + ETFFlowAgent contradiction (`agents.py:2021-2035, 2924-2938`).**
+Both look at the SAME stock-vs-sector spread and were drawing OPPOSITE
+conclusions at >60% confidence — momentum continuation (PUT) vs
+mean-reversion catch-up (CALL) — cancelling each other out as noise.
+Fixed by (a) capping Sector RS conviction at 72 (was 85), and
+(b) requiring an RSI extreme (≤40 oversold or ≥65 overbought) before
+ETF Flow's catch-up/revert signals fire. They now only contradict
+when the data genuinely supports both readings.
+
+**Verification across 8 tickers (swing horizon, all 30 agents firing,
+0 exceptions):**
+```
+AAPL    8C/ 4P/18H → BUY_CALL @ 63.8
+TSLA    4C/ 4P/22H → HOLD     @ 52.2  (correctly: split)
+NVDA   10C/ 2P/18H → BUY_CALL @ 81.9
+META   12C/ 2P/16H → BUY_CALL @ 72.8
+MSFT    9C/ 2P/19H → BUY_CALL @ 63.8
+SPY    10C/ 1P/19H → BUY_CALL @ 79.7
+AMD    10C/ 2P/18H → BUY_CALL @ 74.5
+GOOGL  11C/ 2P/17H → HOLD     @ 50.0  (earnings veto: 2d to print)
+```
+Insider Trading agent now showing real data: NVDA "8 sellers, $172.1M out",
+META "19 sellers, $106.3M out", AMD "9 sellers, $63.9M out", MSFT "1b/1s".
+
+**No deployment / setup impact.** All changes are in 2 Python files
+(`agents.py`, `server.py`). No new dependencies, no schema changes,
+no env-var changes, no new directories. The Dell R740xd + Oracle
+cluster bootstrap scripts and the deployment guide remain valid.
 
 ## v7.1.4 — Threshold recalibration (everything was HOLD-ing)
 
